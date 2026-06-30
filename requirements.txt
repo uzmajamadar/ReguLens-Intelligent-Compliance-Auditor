@@ -1,0 +1,44 @@
+# Python dependencies for AutoDoc
+# Add packages here as you install them, e.g.:
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+llama-index
+llama-index-vector-stores-qdrant
+llama-index-embeddings-huggingface
+sentence-transformers
+qdrant-client
+groq
+pymupdf
+pytesseract
+Pillow
+python-dotenv
+sqlalchemy
+bcrypt
+python-jose[cryptography]
+fpdf2
+
+httpx>=0.24.0
+psycopg2-binary>=2.9.9
+boto3>=1.34.0
+
+# Testing dependencies for AutoDoc project
+# Install with: pip install -r requirements-dev.txt
+ 
+# Core testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+ 
+# Test utilities
+faker>=19.0.0
+ 
+# For generating test PDFs
+reportlab>=4.0.0
+ 
+# Development/linting (optional)
+black>=23.0.0
+flake8>=6.0.0
+isort>=5.12.0
+
