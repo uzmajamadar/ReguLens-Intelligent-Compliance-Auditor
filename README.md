@@ -1,92 +1,250 @@
 # ReguLens AI
 
-**AI-Powered Regulatory Compliance & Audit Intelligence Platform**
+🚀 *AI-Powered Regulatory Compliance & Audit Intelligence Platform*
 
-ReguLens automates compliance document review against GDPR, CCPA, and other regulatory frameworks. Upload policies, detect violations, assign review tasks, and track remediation — all in one place.
+---
 
-## Features
+## Overview
 
-- **Document Ingestion** — Upload PDFs, auto-extract text/OCR, chunk, and embed
-- **Compliance Scanning** — Detect GDPR/CCPA violations using rule-based + AI analysis
-- **Review Workflow** — Submit, assign, review, approve/reject, and resolve findings
-- **Notifications** — Email + Slack alerts for assignments and status changes
-- **Version Control** — Track document versions with diff comparisons
-- **Role-Based Access** — Admin, Compliance Manager, and Reviewer roles
-- **RAG Query** — Ask natural language questions about your documents
-- **Docker Ready** — Full Docker Compose setup with PostgreSQL + Qdrant
+**ReguLens AI** automates compliance document review against major regulatory frameworks. Upload policies, detect violations, assign review tasks, and track remediation — all in one place.
 
-## Quick Start
+## Why ReguLens?
+
+Manual compliance review is slow, expensive, and error-prone. ReguLens brings AI-powered automation to the compliance workflow while keeping humans in the loop for critical decisions.
+
+- **Fast** — reduce review time from weeks to hours
+- **Multi-Framework** — GDPR, HIPAA, SOC 2, PCI DSS, ISO 27001, CCPA
+- **AI-Powered** — rule evaluation via Groq LLM with semantic vector search
+- **Human-in-the-Loop** — review queue with task assignment and audit trail
+- **Ready to Deploy** — Docker Compose with PostgreSQL + Qdrant
+
+---
+
+## ✨ Features
+
+- **Document Ingestion** — Upload PDFs, auto-extract text, OCR fallback, chunk, and embed
+- **Compliance Scanning** — AI-powered rule evaluation with severity grading (A–F)
+- **Review Workflow** — Customizable steps, role-based assignment, round-robin distribution
+- **Remediation Copilot** — AI-generated fix suggestions with before/after comparison
+- **RAG Document Query** — Ask natural language questions about your documents
+- **Version Control** — Track revisions with cross-version diff comparison
+- **Notifications** — Email (SMTP/Resend/SendGrid) + Slack with per-framework routing
+- **Role-Based Access** — Admin, Compliance Manager, Reviewer, Document Owner
+- **Audit Trail** — Immutable event logging for every state transition
+
+---
+
+## 📸 Screenshots
+
+| Page | Preview |
+|------|---------|
+| **Dashboard** | *Coming soon* |
+| **Documents** | *Coming soon* |
+| **Compliance Scan** | *Coming soon* |
+| **Review Queue** | *Coming soon* |
+| **Auditor AI (RAG Chat)** | *Coming soon* |
+
+---
+
+## Technical Stack
+
+| Component | Technology |
+|-----------|-----------|
+| **Frontend** | React 19, Vite 8, Tailwind CSS 4, Radix UI, TanStack Query |
+| **Backend** | Python 3.11, FastAPI, SQLAlchemy 2.0, Alembic |
+| **Database** | PostgreSQL 16 (prod) / SQLite (dev) |
+| **Vector Store** | Qdrant (HNSW index, 384-dim) |
+| **Embeddings** | HuggingFace BAAI/bge-small-en-v1.5 |
+| **LLM** | Groq (Llama-3, Mixtral, DeepSeek) |
+| **Auth** | JWT (HS256) + bcrypt |
+| **OCR** | Tesseract via PyMuPDF |
+| **File Storage** | Local filesystem or S3-compatible |
+| **Notifications** | SMTP email, Slack webhooks |
+| **Deployment** | Docker Compose, Netlify |
+
+---
+
+## System Architecture
+
+```
+User (Browser)
+    │
+    ▼
+React SPA ──HTTP /api/*──► FastAPI Server
+                                │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+              PostgreSQL    Qdrant       Groq API
+              (users,      (vector      (LLM rule
+               docs,        embeddings)  evaluation)
+               violations)
+                    │
+                    ▼
+              Email / Slack
+              (notifications)
+```
+
+**How it works:**
+1. Upload a PDF → text extraction → OCR if needed → chunking → embedding → stored in Qdrant
+2. Select frameworks → compliance engine retrieves relevant chunks → Groq evaluates each rule
+3. Violations get severity scores → workflow instances created → tasks assigned by role
+4. Reviewers inspect findings → accept/dismiss → remediation suggestions generated
+5. All actions logged + notified via email/Slack/in-app
+
+---
+
+# Setup & Installation
+
+### Prerequisites
+- Python 3.11+
+- Node.js 20+
+- Docker & Docker Compose (optional)
+- Tesseract OCR
+- Groq API key ([free tier](https://console.groq.com))
 
 ### Local Development
 
 ```bash
+# Clone
+git clone https://github.com/uzmajamadar/ReguLens-Intelligent-Compliance-Auditor.git
+cd regulens
+
 # Backend
 python -m venv venv
-venv\Scripts\activate    # Windows
+venv\Scripts\activate      # Windows
 pip install -r requirements.txt
+
+# Environment
+cp .env.example .env       # Edit with your keys
+
+# Run backend
 uvicorn main:app --reload
 
-# Frontend
+# Frontend (separate terminal)
 cd frontend
 npm install
 npm run dev
 ```
 
-### Docker
+### Docker (Full Stack)
 
 ```bash
 docker compose up --build
 ```
 
-Access:
-- **Frontend**: http://localhost:5173
-- **API Docs**: http://localhost:8000/docs
-- **Qdrant Dashboard**: http://localhost:6333/dashboard
+### Access
 
-### Default Admin Login
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:5173 |
+| API Docs | http://localhost:8000/docs |
+| Qdrant UI | http://localhost:6333/dashboard |
 
-```
-Email:    admin@regulens.ai
-Password: admin123
-```
+### Default Admin
 
-## Testing
+| Email | Password |
+|-------|----------|
+| admin@regulens.ai | admin123 |
+
+---
+
+## Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `JWT_SECRET` | JWT signing secret | Yes |
+| `DATABASE_URL` | PostgreSQL connection string | No |
+| `GROQ_API_KEY` | Groq API key for LLM | Yes |
+| `QDRANT_URL` | Qdrant server URL | No |
+| `QDRANT_API_KEY` | Qdrant cloud API key | No |
+| `COLLECTION_NAME` | Qdrant collection name | No |
+| `APP_URL` | Frontend URL | Yes |
+| `SMTP_HOST` | SMTP server | No |
+| `SMTP_USER` / `SMTP_PASS` | SMTP credentials | No |
+| `SLACK_WEBHOOK_URL` | Default Slack webhook | No |
+| `S3_BUCKET` | S3 bucket for files | No |
+
+---
+
+## API Overview
+
+All endpoints except `/auth/login` and `/auth/register` require a Bearer token.
 
 ```bash
-python -m pytest --tb=short
+# Login
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@regulens.ai", "password": "admin123"}'
+
+# Upload document
+curl -X POST http://localhost:8000/upload/ \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@policy.pdf" \
+  -F "frameworks=GDPR,CCPA"
+
+# Run audit
+curl -X POST http://localhost:8000/audits/scan/1 \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"framework": "GDPR"}'
 ```
 
-All 50+ tests cover authentication, review workflows, notifications, compliance scanning, uploads, and database models.
+Interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc).
 
-## Tech Stack
+---
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python, FastAPI, SQLAlchemy, SQLite/PostgreSQL |
-| Frontend | React, TypeScript, Tailwind CSS, Vite |
-| AI | Sentence Transformers (BGE-small-en-v1.5), Qdrant |
-| Infrastructure | Docker, Docker Compose, Nginx |
+## Core Metrics
 
-## Deployment
+| Metric | Value |
+|--------|-------|
+| **Supported Frameworks** | 6 (GDPR, CCPA, HIPAA, SOC 2, PCI DSS, ISO 27001) |
+| **Rule Count** | 100+ compliance rules |
+| **Embedding Dims** | 384 (bge-small-en-v1.5) |
+| **Chunk Size** | 500 tokens (50 overlap) |
+| **Scoring Range** | A (90+) to F |
+| **Auth** | JWT + bcrypt + RBAC |
+| **Database Migrations** | Alembic |
 
-### Frontend (Netlify)
+---
 
-```bash
-cd frontend
-npm run build
-netlify deploy --prod --dir=dist
-```
+## 🚀 Future Enhancements
 
-### Backend (Render / Railway)
+- Real-time notifications via WebSocket
+- PDF report export with branded templates
+- Custom rule builder UI
+- SSO/SAML integration
+- Bulk document upload
+- Scheduled recurring scans
+- Kubernetes/Helm deployment charts
+- CI/CD pipeline with GitHub Actions
+- Internationalization (i18n)
 
-Set environment variables:
-- `DATABASE_URL` — PostgreSQL connection string
-- `APP_URL` — Frontend URL (for reset-password links)
-- `SMTP_*` / `RESEND_API_KEY` — Email provider
-- `SLACK_WEBHOOK_URL` — Slack notifications (optional)
-- `CORS_ORIGINS` — Comma-separated frontend origins
-- `S3_BUCKET` — S3 bucket for file storage (optional, local disk by default)
+---
+
+## 🤝 Contributions Welcome
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes
+4. Push and open a Pull Request
+
+---
 
 ## License
 
-MIT
+MIT — see `LICENSE` for details.
+
+---
+
+## Author
+
+**Uzma Jamadar**
+
+- GitHub: [@uzmajamadar](https://github.com/uzmajamadar)
+- LinkedIn: [uzmajamadar](https://linkedin.com/in/uzmajamadar)
+
+---
+
+## Acknowledgements
+
+[FastAPI](https://fastapi.tiangolo.com/) · [React](https://react.dev/) · [Tailwind CSS](https://tailwindcss.com/) · [Radix UI](https://www.radix-ui.com/) · [TanStack Query](https://tanstack.com/query) · [Qdrant](https://qdrant.tech/) · [Groq](https://groq.com/) · [HuggingFace](https://huggingface.co/) · [LlamaIndex](https://www.llamaindex.ai/) · [PyMuPDF](https://pymupdf.readthedocs.io/) · [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) · [SQLAlchemy](https://www.sqlalchemy.org/) · [Alembic](https://alembic.sqlalchemy.org/) · [Lucide Icons](https://lucide.dev/)
