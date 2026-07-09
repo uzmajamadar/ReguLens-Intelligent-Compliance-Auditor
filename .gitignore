@@ -39,3 +39,6 @@ uvicorn_out.txt
 
 # Uploads
 uploads/
+
+# opencode
+.opencode/
