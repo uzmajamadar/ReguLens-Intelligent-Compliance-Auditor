@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, hash_password, log_audit, require_role
+from app.auth import Permission, get_current_user, hash_password, log_audit, require_permission
 from app.database import get_db
 from app.models import AuditLog, Document, Organization, ReviewTask, Scan, User, Violation
 
@@ -31,7 +31,7 @@ class UserCreate(BaseModel):
     name: str
     email: str
     password: str
-    role: str = "employee"
+    role: str = "document_owner"
 
 
 class UserUpdate(BaseModel):
@@ -84,7 +84,7 @@ class NeedsOnboarding(BaseModel):
 @router.get("/users", response_model=list[UserOut])
 def list_users(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin", "compliance_manager", "reviewer")),
+    current_user: User = Depends(require_permission(Permission.USER_READ)),
 ):
     users = (
         db.query(User)
@@ -106,12 +106,12 @@ def list_users(
 def create_user(
     req: UserCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.USER_CREATE)),
 ):
     if db.query(User).filter(User.email == req.email).first():
         raise HTTPException(status_code=400, detail="Email already registered.")
 
-    valid_roles = {"admin", "compliance_manager", "reviewer", "employee"}
+    valid_roles = {"admin", "compliance_manager", "reviewer", "document_owner"}
     if req.role not in valid_roles:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(sorted(valid_roles))}")
 
@@ -126,8 +126,9 @@ def create_user(
     db.flush()
     log_audit(db, current_user.id, "user_create", "user", user.id,
               f"Created user {user.email} with role {user.role}")
-    db.commit()
-    db.refresh(user)
+    from app.notifications import notify_account_created
+    notify_account_created(db, user)
+    db.flush()
     return UserOut(
         id=user.id, name=user.name, email=user.email, role=user.role,
         organization_id=user.organization_id, is_active=user.is_active,
@@ -139,7 +140,7 @@ def create_user(
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.USER_READ)),
 ):
     user = db.query(User).filter(
         User.id == user_id,
@@ -159,7 +160,7 @@ def update_user(
     user_id: int,
     req: UserUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.USER_UPDATE)),
 ):
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot modify your own account here. Use the profile page.")
@@ -174,7 +175,7 @@ def update_user(
     if req.name is not None:
         user.name = req.name
     if req.role is not None:
-        valid_roles = {"admin", "compliance_manager", "reviewer", "employee"}
+        valid_roles = {"admin", "compliance_manager", "reviewer", "document_owner"}
         if req.role not in valid_roles:
             raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(sorted(valid_roles))}")
         user.role = req.role
@@ -186,8 +187,7 @@ def update_user(
     db.flush()
     log_audit(db, current_user.id, "user_update", "user", user.id,
               f"Updated user {user.email}")
-    db.commit()
-    db.refresh(user)
+    db.flush()
     return UserOut(
         id=user.id, name=user.name, email=user.email, role=user.role,
         organization_id=user.organization_id, is_active=user.is_active,
@@ -199,7 +199,7 @@ def update_user(
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.USER_DELETE)),
 ):
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account.")
@@ -224,7 +224,6 @@ def delete_user(
     db.flush()
     log_audit(db, current_user.id, "user_delete", "user", user.id,
               f"Deactivated user {user.email}")
-    db.commit()
     return {"message": f"User '{user.email}' deactivated."}
 
 
@@ -234,7 +233,7 @@ def list_audit_logs(
     offset: int = Query(0, ge=0),
     action: str | None = Query(None, description="Filter by action type"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.AUDIT_LOG_READ)),
 ):
     q = (
         db.query(AuditLog, User.email.label("user_email"))
@@ -264,7 +263,7 @@ def list_audit_logs(
 @router.get("/stats", response_model=AdminStats)
 def get_admin_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.STATS_READ)),
 ):
     org_id = current_user.organization_id
     total_users = db.query(User).filter(User.organization_id == org_id).count()
@@ -282,7 +281,7 @@ def get_admin_stats(
     pending_reviews = (
         db.query(ReviewTask)
         .join(Document, ReviewTask.document_id == Document.id)
-        .filter(Document.organization_id == org_id, ReviewTask.status == "pending_review")
+        .filter(Document.organization_id == org_id, ReviewTask.status == "pending")
         .count()
     )
     return AdminStats(
@@ -298,7 +297,7 @@ def get_admin_stats(
 @router.get("/organization", response_model=OrganizationOut)
 def get_organization(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.ORG_READ)),
 ):
     org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
     if not org:
@@ -314,7 +313,7 @@ def get_organization(
 def update_organization(
     req: OrganizationUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.ORG_UPDATE)),
 ):
     org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
     if not org:
@@ -323,8 +322,6 @@ def update_organization(
     db.flush()
     log_audit(db, current_user.id, "org_update", "organization", org.id,
               f"Organization renamed to '{req.name}'")
-    db.commit()
-    db.refresh(org)
     return OrganizationOut(
         id=org.id,
         name=org.name,
@@ -335,7 +332,7 @@ def update_organization(
 @router.get("/organization/needs-onboarding", response_model=NeedsOnboarding)
 def needs_onboarding(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.ORG_ONBOARDING_READ)),
 ):
     org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
     if not org:
@@ -344,12 +341,12 @@ def needs_onboarding(
     return NeedsOnboarding(needs_onboarding=org.name == "Default Organization" and user_count == 1)
 
 
-@router.put("/review/{task_id}/assign")
+@router.put("/reviews/{task_id}/actions/assign")
 def assign_review_task(
     task_id: int,
     req: AssignReviewRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin", "compliance_manager", "reviewer")),
+    current_user: User = Depends(require_permission(Permission.REVIEW_ASSIGN)),
 ):
     task = (
         db.query(ReviewTask)
@@ -360,12 +357,18 @@ def assign_review_task(
     if not task:
         raise HTTPException(status_code=404, detail="Review task not found")
 
+    if task.status in ("resolved", "dismissed"):
+        raise HTTPException(status_code=400, detail="Cannot assign a finalized review task")
+
     assignee = db.query(User).filter(
         User.id == req.assigned_to_id,
         User.organization_id == current_user.organization_id,
     ).first()
     if not assignee:
         raise HTTPException(status_code=404, detail="Assignee not found")
+
+    old_assignee = task.assigned_to
+    event_type = "assigned" if not old_assignee else "reassigned"
 
     if not task.due_date:
         task.due_date = datetime.now(timezone.utc) + timedelta(days=7)
@@ -374,11 +377,11 @@ def assign_review_task(
     task.assigned_by = current_user.name
     if not task.submitted_by:
         task.submitted_by = current_user.name
+        task.submitted_by_id = current_user.id
     if req.note:
         task.notes = (task.notes + "\n---\n" + req.note) if task.notes else req.note
-    if task.status in ("pending_review", "pending_assignment"):
+    if task.status == "pending":
         task.status = "assigned"
-        # Also update the associated violation status
         violation = db.query(Violation).filter(
             Violation.scan_id == task.scan_id, Violation.rule_id == task.rule_id
         ).first()
@@ -386,11 +389,12 @@ def assign_review_task(
             violation.status = "assigned"
 
     db.flush()
+    from app.routers.reviews import log_review_event
+    log_review_event(db, task_id, current_user.id, event_type,
+                     old_value=old_assignee, new_value=assignee.name, notes=req.note)
     log_audit(db, current_user.id, "review_assign", "review_task", task_id,
               f"Assigned review task {task_id} to {assignee.name}")
 
     from app.notifications import notify_assigned
     notify_assigned(db, task, assignee, current_user)
-
-    db.commit()
     return {"message": f"Review task {task_id} assigned to {assignee.name}.", "assigned_to": assignee.name}

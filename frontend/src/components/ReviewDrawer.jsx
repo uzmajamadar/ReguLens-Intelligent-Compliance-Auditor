@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, X, ThumbsUp, ThumbsDown, AlertTriangle, FileText, Shield } from "lucide-react";
 
 const DISMISS_REASONS = [
@@ -28,8 +30,6 @@ const STATUS_DISPLAY = {
 };
 
 export default function ReviewDrawer({ task, open, onClose, onApprove, onReject, onNeedsFix, notes, onNotesChange, actionLoading }) {
-  if (!open || !task) return null;
-
   const [showDismissReason, setShowDismissReason] = useState(false);
   const [dismissReason, setDismissReason] = useState("");
 
@@ -37,6 +37,8 @@ export default function ReviewDrawer({ task, open, onClose, onApprove, onReject,
     setShowDismissReason(false);
     setDismissReason("");
   }, [task]);
+
+  if (!open || !task) return null;
 
   const v = task.violation;
   const isInReview = task.status === "in_review";
@@ -143,12 +145,11 @@ export default function ReviewDrawer({ task, open, onClose, onApprove, onReject,
           </Section>
 
           <Section label="Reviewer Notes">
-            <textarea
+            <Textarea
               value={notes[task.id] || ""}
               onChange={(e) => onNotesChange((prev) => ({ ...prev, [task.id]: e.target.value }))}
               placeholder="Add your review notes here..."
               rows={4}
-              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring"
             />
           </Section>
         </div>
@@ -168,16 +169,19 @@ export default function ReviewDrawer({ task, open, onClose, onApprove, onReject,
               </Button>
               {showDismissReason ? (
                 <div className="flex items-center gap-1">
-                  <select
+                  <Select
                     value={dismissReason}
-                    onChange={(e) => setDismissReason(e.target.value)}
-                    className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+                    onValueChange={setDismissReason}
                   >
-                    <option value="">Reason...</option>
-                    {DISMISS_REASONS.map((r) => (
-                      <option key={r.value} value={r.value}>{r.label}</option>
-                    ))}
-                  </select>
+                    <SelectTrigger className="h-7 text-xs w-36">
+                      <SelectValue placeholder="Reason..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DISMISS_REASONS.map((r) => (
+                        <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <Button
                     variant="outline"
                     size="sm"

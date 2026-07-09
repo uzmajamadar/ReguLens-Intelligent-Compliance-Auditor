@@ -132,7 +132,7 @@ export async function downloadDocument(documentId) {
 }
 
 export async function exportVersionPdf(documentId, versionId) {
-  const res = await fetch(`${BASE}/documents/${documentId}/versions/${versionId}/export`, {
+  const res = await fetch(`${BASE}/documents/${documentId}/versions/${versionId}/actions/export`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -188,7 +188,7 @@ export async function runScan(documentId, framework = "GDPR", customName, custom
   } else {
     params = framework ? `?framework=${encodeURIComponent(framework)}` : "";
   }
-  const res = await fetch(`${BASE}/documents/${documentId}/scan${params}`, {
+  const res = await fetch(`${BASE}/documents/${documentId}/actions/scan${params}`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -264,43 +264,36 @@ export async function listAllViolations(params = {}) {
   return res.json();
 }
 
-export async function updateViolationStatus(violationId, status) {
-  const res = await fetch(`${BASE}/compliance/violations/${violationId}/status`, {
+export async function patchViolation(violationId, data) {
+  const res = await fetch(`${BASE}/compliance/violations/${violationId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error("Failed to update violation status");
+  if (!res.ok) throw new Error("Failed to update violation");
   return res.json();
 }
 
-export async function assignViolation(violationId, assignedTo) {
-  const res = await fetch(`${BASE}/compliance/violations/${violationId}/assign`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ assigned_to: assignedTo }),
-  });
-  if (!res.ok) throw new Error("Failed to assign violation");
-  return res.json();
-}
-
-export async function listReviewTasks(statusFilter = "pending_review", framework = null, assignedTo = null) {
-  let params = `?status_filter=${encodeURIComponent(statusFilter)}`;
-  if (framework) params += `&framework=${encodeURIComponent(framework)}`;
-  if (assignedTo) params += `&assigned_to_id=${encodeURIComponent(assignedTo)}`;
-  const res = await fetch(`${BASE}/compliance/review${params}`, { headers: { ...authHeaders() } });
+export async function listReviewTasks(statusFilter = "", framework = null, assignedToId = null) {
+  const qs = new URLSearchParams();
+  if (statusFilter) qs.set("status_filter", statusFilter);
+  if (framework) qs.set("framework", framework);
+  if (assignedToId) qs.set("assigned_to_id", assignedToId);
+  const query = qs.toString();
+  const url = query ? `${BASE}/compliance/reviews?${query}` : `${BASE}/compliance/reviews`;
+  const res = await fetch(url, { headers: { ...authHeaders() } });
   if (!res.ok) throw new Error("Failed to fetch review tasks");
   return res.json();
 }
 
 export async function getReviewStats() {
-  const res = await fetch(`${BASE}/compliance/review/stats`, { headers: { ...authHeaders() } });
+  const res = await fetch(`${BASE}/compliance/reviews/stats`, { headers: { ...authHeaders() } });
   if (!res.ok) throw new Error("Failed to fetch review stats");
   return res.json();
 }
 
 export async function approveReviewTask(taskId) {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/approve`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/approve`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -309,7 +302,7 @@ export async function approveReviewTask(taskId) {
 }
 
 export async function startReviewTask(taskId) {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/start-review`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/start`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -318,7 +311,7 @@ export async function startReviewTask(taskId) {
 }
 
 export async function rejectReviewTask(taskId, notes = "") {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/reject?notes=${encodeURIComponent(notes)}`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/reject?notes=${encodeURIComponent(notes)}`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -327,7 +320,7 @@ export async function rejectReviewTask(taskId, notes = "") {
 }
 
 export async function needsFixReviewTask(taskId, notes = "") {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/needs-fix?notes=${encodeURIComponent(notes)}`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/needs-fix?notes=${encodeURIComponent(notes)}`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -336,7 +329,7 @@ export async function needsFixReviewTask(taskId, notes = "") {
 }
 
 export async function resolveReviewTask(taskId) {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/resolve`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/resolve`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -345,7 +338,7 @@ export async function resolveReviewTask(taskId) {
 }
 
 export async function retryReviewTask(taskId) {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/retry`, {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}/actions/retry`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -353,19 +346,20 @@ export async function retryReviewTask(taskId) {
   return res.json();
 }
 
-export async function setReviewDueDate(taskId, dueDate) {
-  const res = await fetch(`${BASE}/compliance/review/${taskId}/due-date?due_date=${encodeURIComponent(dueDate)}`, {
-    method: "PUT",
-    headers: { ...authHeaders() },
+export async function updateReviewTask(taskId, data) {
+  const res = await fetch(`${BASE}/compliance/reviews/${taskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error("Failed to set due date");
+  if (!res.ok) throw new Error("Failed to update review task");
   return res.json();
 }
 
 // ── Remediation Copilot ───────────────────────────────────────────────
 
 export async function generateRemediation(violationId) {
-  const res = await fetch(`${BASE}/compliance/remediate/${violationId}`, {
+  const res = await fetch(`${BASE}/compliance/violations/${violationId}/actions/remediate`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -377,7 +371,7 @@ export async function generateRemediation(violationId) {
 }
 
 export async function acceptRemediation(suggestionId) {
-  const res = await fetch(`${BASE}/compliance/remediation/${suggestionId}/accept`, {
+  const res = await fetch(`${BASE}/compliance/remediations/${suggestionId}/actions/accept`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -386,7 +380,7 @@ export async function acceptRemediation(suggestionId) {
 }
 
 export async function rejectRemediation(suggestionId) {
-  const res = await fetch(`${BASE}/compliance/remediation/${suggestionId}/reject`, {
+  const res = await fetch(`${BASE}/compliance/remediations/${suggestionId}/actions/reject`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -396,15 +390,15 @@ export async function rejectRemediation(suggestionId) {
 
 export async function editRemediation(suggestionId, modifiedText) {
   const res = await fetch(
-    `${BASE}/compliance/remediation/${suggestionId}/edit?modified_text=${encodeURIComponent(modifiedText)}`,
-    { method: "POST", headers: { ...authHeaders() } }
+    `${BASE}/compliance/remediations/${suggestionId}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json", ...authHeaders() }, body: JSON.stringify({ modified_text: modifiedText }) }
   );
   if (!res.ok) throw new Error("Failed to edit remediation");
   return res.json();
 }
 
 export async function applyRemediation(suggestionId) {
-  const res = await fetch(`${BASE}/compliance/remediation/${suggestionId}/apply`, {
+  const res = await fetch(`${BASE}/compliance/remediations/${suggestionId}/actions/apply`, {
     method: "POST",
     headers: { ...authHeaders() },
   });
@@ -422,7 +416,7 @@ export async function listViolationRemediations(violationId) {
 }
 
 export async function submitForReview(violationId, suggestionId) {
-  let url = `${BASE}/compliance/violations/${violationId}/submit-review`;
+  let url = `${BASE}/compliance/violations/${violationId}/actions/submit-review`;
   if (suggestionId) url += `?suggestion_id=${suggestionId}`;
   const res = await fetch(url, {
     method: "POST",
@@ -535,10 +529,10 @@ export async function needsOnboarding() {
 // ── Admin: Review Assignment ──────────────────────────────────────────
 
 export async function assignReviewTask(taskId, assignedToId, note = "") {
-  const res = await fetch(`${BASE}/admin/review/${taskId}/assign`, {
+  const res = await fetch(`${BASE}/admin/reviews/${taskId}/actions/assign`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ assigned_to_id: assignedToId, note: note || undefined }),
+    body: JSON.stringify({ assigned_to_id: Number(assignedToId), note: note || undefined }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -742,6 +736,25 @@ export async function queryDocument(question, collectionName) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || "Failed to query document");
+  }
+  return res.json();
+}
+
+export async function listMyTasks() {
+  const res = await fetch(`${BASE}/documents/my-tasks`, { headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const detail = Array.isArray(err.detail) ? err.detail.map(d => d.msg).join("; ") : err.detail;
+    throw new Error(detail || "Failed to fetch my tasks");
+  }
+  return res.json();
+}
+
+export async function getDocumentDiff(documentId, v1, v2) {
+  const res = await fetch(`${BASE}/documents/${documentId}/diff?v1=${v1}&v2=${v2}`, { headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to fetch diff");
   }
   return res.json();
 }

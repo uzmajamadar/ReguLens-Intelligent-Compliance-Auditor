@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     smtp_pass: str = ""
     email_from: str = "ReguLens <noreply@regulens.ai>"
     slack_webhook_url: str = ""
+    slack_webhooks_by_framework: str = "{}"  # JSON dict: {"GDPR": "https://...", "CCPA": "https://...", "*": "https://..."}
     app_url: str = "http://localhost:5173"
 
     # CORS — comma-separated origins; "*" allows all

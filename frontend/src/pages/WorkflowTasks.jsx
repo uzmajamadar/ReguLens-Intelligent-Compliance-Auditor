@@ -5,6 +5,8 @@ import { useToast } from "../hooks/use-toast";
 import { listWorkflowTasks, actOnWorkflowTask } from "../lib/api";
 import { Card, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Textarea } from "../components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { CheckCircle, XCircle, RefreshCw, Loader2 } from "lucide-react";
 
@@ -100,36 +102,35 @@ export default function WorkflowTasks() {
 
                 {task.status === "pending" && (
                   <div className="mt-4 space-y-3">
-                    <textarea
+                    <Textarea
                       placeholder="Add notes (optional)..."
                       value={notes[task.id] || ""}
                       onChange={(e) => setNotes((prev) => ({ ...prev, [task.id]: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none"
                       rows={2}
                     />
                     <div className="flex gap-2">
-                      <button
+                      <Button
                         onClick={() => handleAction(task.id, "approved")}
                         disabled={actionLoading === task.id}
-                        className="flex items-center gap-1.5 h-9 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition text-sm font-medium"
+                        className="bg-green-600 hover:bg-green-700"
                       >
                         {actionLoading === task.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
                         Approve
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         onClick={() => handleAction(task.id, "rejected")}
                         disabled={actionLoading === task.id}
-                        className="flex items-center gap-1.5 h-9 px-4 bg-destructive text-destructive-foreground rounded-lg hover:bg-destructive/90 disabled:opacity-50 transition text-sm font-medium"
+                        variant="destructive"
                       >
                         <XCircle className="w-4 h-4" /> Reject
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         onClick={() => handleAction(task.id, "changes_requested")}
                         disabled={actionLoading === task.id}
-                        className="flex items-center gap-1.5 h-9 px-4 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition text-sm font-medium"
+                        variant="default"
                       >
                         <RefreshCw className="w-4 h-4" /> Request Changes
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 )}

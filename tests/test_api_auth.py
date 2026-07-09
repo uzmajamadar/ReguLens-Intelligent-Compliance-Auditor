@@ -305,7 +305,7 @@ class TestRoleBasedAccess:
             "name": "New User",
             "email": "new@test.com",
             "password": "pass123",
-            "role": "employee",
+            "role": "document_owner",
         })
         assert resp.status_code == status.HTTP_403_FORBIDDEN
         main.app.dependency_overrides.clear()

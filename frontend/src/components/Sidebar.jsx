@@ -1,85 +1,97 @@
-import { NavLink, useNavigate, useLocation } from "react-router-dom";
-import { ChevronDown, Files, MessageSquare, Shield, ClipboardCheck, LogOut, FolderOpen, Users, ClipboardList, LayoutDashboard, Settings, Scan, AlertTriangle } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
+import {
+  LayoutDashboard,
+  FileText,
+  Shield,
+  ClipboardCheck,
+  BarChart3,
+  ClipboardList,
+  Users,
+  Settings,
+  PanelLeftClose,
+  PanelLeft,
+  LogOut,
+  ListChecks,
+} from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../hooks/use-toast";
-import NotificationBell from "./NotificationBell";
 import { Avatar, AvatarFallback } from "./ui/avatar";
-import { Separator } from "./ui/separator";
 import { cn } from "../lib/utils";
-import * as Collapsible from "@radix-ui/react-collapsible";
-import { useState } from "react";
 import { useSidebar } from "./ui/sidebar";
+
+function ActiveBar() {
+  return <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-full bg-sidebar-foreground" />;
+}
 
 function NavItem({ to, icon: Icon, label }) {
   const { open } = useSidebar();
+
   return (
     <NavLink
       to={to}
       className={({ isActive }) =>
         cn(
-          "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+          "relative flex items-center gap-3 px-4 py-2 text-sm font-medium transition-colors",
           isActive
-            ? "bg-sidebar-accent text-sidebar-accent-foreground"
-            : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
-          !open && "justify-center px-2"
+            ? "bg-sidebar-accent/40 text-sidebar-foreground"
+            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/20 hover:text-sidebar-foreground/90"
         )
       }
       title={!open ? label : undefined}
     >
-      <Icon className="size-4 shrink-0" />
-      {open && <span className="truncate">{label}</span>}
+      {({ isActive }) => (
+        <>
+          {isActive && open && <ActiveBar />}
+          <Icon className="size-4 shrink-0" />
+          {open && <span className="truncate">{label}</span>}
+        </>
+      )}
     </NavLink>
   );
 }
 
-function NavSection({ title, children }) {
+function NavItemCompact({ to, icon: Icon, label }) {
   const { open } = useSidebar();
-  const [sectionOpen, setSectionOpen] = useState(true);
-  if (!open) return <>{children}</>;
+
   return (
-    <Collapsible.Root open={sectionOpen} onOpenChange={setSectionOpen}>
-      <Collapsible.Trigger className="flex w-full items-center justify-between px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 hover:text-sidebar-foreground/60 transition-colors">
-        {title}
-        <ChevronDown className={cn("size-3 transition-transform", sectionOpen && "rotate-180")} />
-      </Collapsible.Trigger>
-      <Collapsible.Content className="space-y-1 pt-1">
-        {children}
-      </Collapsible.Content>
-    </Collapsible.Root>
+    <NavLink
+      to={to}
+      className={({ isActive }) =>
+        cn(
+          "relative flex items-center justify-center py-2 text-sm font-medium transition-colors",
+          isActive
+            ? "bg-sidebar-accent/40 text-sidebar-foreground"
+            : "text-sidebar-foreground/60 hover:bg-sidebar-accent/20 hover:text-sidebar-foreground/90"
+        )
+      }
+      title={!open ? label : undefined}
+    >
+      {({ isActive }) => (
+        <>
+          {isActive && <ActiveBar />}
+          <Icon className="size-4 shrink-0 mx-auto" />
+        </>
+      )}
+    </NavLink>
   );
 }
 
-function CollapsibleGroup({ icon: Icon, label, children, defaultOpen }) {
-  const { open } = useSidebar();
-  const [groupOpen, setGroupOpen] = useState(() => defaultOpen ?? false);
-
-  if (!open) {
-    return (
-      <div className="space-y-1">
-        {children}
-      </div>
-    );
-  }
-
-  return (
-    <Collapsible.Root open={groupOpen} onOpenChange={setGroupOpen}>
-      <Collapsible.Trigger className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors">
-        <Icon className="size-4 shrink-0" />
-        <span className="flex-1 text-left">{label}</span>
-        <ChevronDown className={cn("size-3 transition-transform", groupOpen && "rotate-180")} />
-      </Collapsible.Trigger>
-      <Collapsible.Content className="ml-4 mt-1 space-y-1">
-        {children}
-      </Collapsible.Content>
-    </Collapsible.Root>
-  );
-}
+const NAV_ITEMS = [
+  { to: "/compliance", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/documents", icon: FileText, label: "Documents" },
+  { to: "/my-tasks", icon: ListChecks, label: "My Tasks" },
+  { to: "/compliance/details", icon: Shield, label: "Compliance" },
+  { to: "/compliance/review", icon: ClipboardCheck, label: "Review Queue", requiresRole: "reviewer" },
+  { to: "/reports", icon: BarChart3, label: "Reports" },
+  { to: "/admin/audit-logs", icon: ClipboardList, label: "Audit Logs", adminOnly: true },
+  { to: "/admin/users", icon: Users, label: "Organization", adminOnly: true },
+  { to: "/settings", icon: Settings, label: "Settings" },
+];
 
 export default function Sidebar() {
-  const { open } = useSidebar();
+  const { open, toggleSidebar } = useSidebar();
   const { user, hasRole, logout } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
   const { toast } = useToast();
 
   function handleLogout() {
@@ -88,110 +100,89 @@ export default function Sidebar() {
     navigate("/login");
   }
 
+  const Item = open ? NavItem : NavItemCompact;
+
   return (
     <aside
       className={cn(
-        "flex h-full flex-col bg-sidebar text-sidebar-foreground transition-all duration-300",
-        open ? "w-60" : "w-16"
+        "flex h-full flex-col bg-sidebar text-sidebar-foreground transition-all duration-200 border-r border-sidebar-border",
+        open ? "w-56" : "w-14"
       )}
     >
-      <div className={cn("flex items-center px-5 pt-6 pb-4", !open && "justify-center px-0")}>
-        <div className="flex items-center gap-2">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground text-sm font-bold">
-            A
+      <div className={cn("flex items-center px-4 pt-4 pb-3", !open && "justify-center px-0")}>
+        <div className="flex items-center gap-2.5">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sidebar-accent">
+            <Shield className="size-3.5 text-sidebar-foreground" />
           </div>
-          {open && <span className="text-base font-semibold tracking-tight">ReguLens</span>}
+          {open && (
+            <span className="text-sm font-bold tracking-tight text-sidebar-foreground">ReguLens</span>
+          )}
         </div>
-        {open && <div className="ml-auto"><NotificationBell /></div>}
       </div>
 
-      <nav className="flex-1 overflow-y-auto space-y-1 px-3 py-2">
-        <NavSection title={open ? "Navigation" : ""}>
-          <NavItem to="/compliance" icon={LayoutDashboard} label="Dashboard" />
+      <div className="flex-1 overflow-y-auto overflow-x-hidden space-y-0.5 pt-1">
+        {NAV_ITEMS.map((item) => {
+          if (item.adminOnly && !hasRole("admin")) return null;
+          if (item.requiresRole === "reviewer" && !hasRole("admin", "compliance_manager", "reviewer")) return null;
+          return <Item key={item.to} to={item.to} icon={item.icon} label={item.label} />;
+        })}
+      </div>
 
-          <CollapsibleGroup icon={FolderOpen} label="Storage" defaultOpen={location.pathname.startsWith("/storage")}>
-            <NavItem to="/storage" icon={Files} label="Files" />
-          </CollapsibleGroup>
-
-          <NavItem to="/compliance/details?tab=violations" icon={AlertTriangle} label="Violations" />
-
-          <CollapsibleGroup icon={Shield} label="Compliance" defaultOpen={location.pathname.startsWith("/compliance") && !location.pathname.startsWith("/compliance/review") && !location.pathname.startsWith("/compliance/details")}>
-            <NavItem to="/compliance/details" icon={Scan} label="Scan Results" />
-          </CollapsibleGroup>
-
-          {(hasRole("admin") || hasRole("compliance_manager") || hasRole("reviewer")) && (
-            <NavItem to="/compliance/review" icon={ClipboardCheck} label="Review Queue" />
-          )}
-
-          <NavItem to="/auditor-ai" icon={MessageSquare} label="AI Assistant" />
-
-          {hasRole("admin") && (
-            <NavItem to="/admin/audit-logs" icon={ClipboardList} label="Audit Logs" />
-          )}
-        </NavSection>
-
-        {open && hasRole("admin") && (
-          <div className="pt-2">
-            <NavSection title="Settings">
-              <NavItem to="/admin" icon={LayoutDashboard} label="Admin Dashboard" />
-              <NavItem to="/admin/users" icon={Users} label="User Management" />
-              <NavItem to="/admin/audit-logs" icon={ClipboardList} label="Audit Logs" />
-            </NavSection>
-          </div>
-        )}
-
-        {!open && hasRole("admin") && (
-          <NavItem to="/admin" icon={Settings} label="Settings" />
-        )}
-      </nav>
-
-      {user && (
-        <>
-          <Separator className="mx-3 w-auto" />
-          <div className={cn("px-4 py-3 space-y-2", !open && "px-2 flex flex-col items-center")}>
+      <div className={cn("border-t border-sidebar-border mt-auto", !open && "flex flex-col items-center")}>
+        {user && (
+          <div className={cn("px-3 py-2.5", !open && "px-0")}>
             <NavLink
               to="/profile"
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                  "flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm font-medium transition-colors",
                   isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
-                  !open && "justify-center px-2"
+                    ? "bg-sidebar-accent/40 text-sidebar-foreground"
+                    : "text-sidebar-foreground/60 hover:bg-sidebar-accent/20 hover:text-sidebar-foreground/90",
+                  !open && "justify-center px-0"
                 )
               }
               title={!open ? "Profile" : undefined}
             >
-              <div className={cn("flex items-center gap-3 flex-1 min-w-0", !open && "justify-center")}>
-                <Avatar className="size-7 shrink-0">
-                  <AvatarFallback className="text-[11px] font-bold uppercase bg-sidebar-primary/20 text-sidebar-primary">
-                    {user.name?.charAt(0) || user.email?.charAt(0) || "?"}
-                  </AvatarFallback>
-                </Avatar>
-                {open && (
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium truncate">{user.name || user.email}</p>
-                    <span className="inline-block px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider rounded bg-sidebar-primary/20 text-sidebar-primary">
-                      {user.role}
-                    </span>
-                  </div>
-                )}
-              </div>
+              <Avatar className="size-6 shrink-0">
+                <AvatarFallback className="text-[9px] font-bold uppercase bg-sidebar-accent text-sidebar-foreground">
+                  {user.name?.charAt(0) || user.email?.charAt(0) || "?"}
+                </AvatarFallback>
+              </Avatar>
+              {open && (
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-semibold text-sidebar-foreground truncate leading-none">
+                    {user.name || user.email}
+                  </p>
+                  <p className="text-[10px] text-sidebar-foreground/40 truncate mt-px">
+                    {user.role?.replace("_", " ")}
+                  </p>
+                </div>
+              )}
             </NavLink>
+          </div>
+        )}
+
+        <div className={cn("flex items-center px-3 pb-3", !open && "justify-center px-0")}>
+          <button
+            onClick={toggleSidebar}
+            className="flex items-center justify-center rounded-lg p-1.5 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/20 transition-colors"
+            title={open ? "Collapse sidebar" : "Expand sidebar"}
+          >
+            {open ? <PanelLeftClose className="size-3.5" /> : <PanelLeft className="size-3.5" />}
+          </button>
+          {open && (
             <button
               onClick={handleLogout}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors",
-                open ? "w-full" : "justify-center w-auto"
-              )}
-              title={!open ? "Sign out" : undefined}
+              className="flex items-center gap-1.5 text-xs text-sidebar-foreground/40 hover:text-sidebar-foreground/70 transition-colors ml-auto"
+              title="Sign out"
             >
-              <LogOut className="size-3.5 shrink-0" />
-              {open && "Sign out"}
+              <LogOut className="size-3.5" />
+              Sign out
             </button>
-          </div>
-        </>
-      )}
+          )}
+        </div>
+      </div>
     </aside>
   );
 }

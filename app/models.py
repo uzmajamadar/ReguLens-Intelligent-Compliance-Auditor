@@ -2,7 +2,7 @@
 models.py — SQLAlchemy ORM models for documents, versions, and feedback.
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -27,7 +27,7 @@ class User(Base):
     name = Column(String(255), nullable=False)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), nullable=False, default="employee")
+    role = Column(String(50), nullable=False, default="document_owner")
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -63,6 +63,7 @@ class Document(Base):
     filename = Column(String(255), nullable=False)
     original_filename = Column(String(255), nullable=False)
     file_size_bytes = Column(Integer, nullable=False)
+    content_hash = Column(String(64), nullable=True, index=True)
     file_path = Column(String(512), nullable=True)
 
     # Version grouping
@@ -150,6 +151,10 @@ class AuditFeedback(Base):
     status = Column(String(50), nullable=False)
     notes = Column(Text, nullable=True)
 
+    # Ownership & org scoping
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self) -> str:
@@ -184,6 +189,10 @@ class Violation(Base):
     """Records individual rule failures, descriptions, excerpt, severity."""
     __tablename__ = "violations"
 
+    __table_args__ = (
+        UniqueConstraint("scan_id", "rule_id", name="uq_violation_scan_rule"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     scan_id = Column(Integer, ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
     rule_id = Column(String(100), nullable=False)
@@ -197,9 +206,10 @@ class Violation(Base):
     confidence = Column(Integer, nullable=True)     # 0-100
     source_chunks = Column(Text, nullable=True)     # JSON array of chunk references
     page_number = Column(Integer, nullable=True)    # Primary page where violation was found
-    status = Column(String(50), default="open")  # open, pending_assignment, assigned, in_review, approved, resolved, dismissed
+    status = Column(String(50), default="open")  # open, pending, assigned, in_review, approved, resolved, dismissed
     assigned_to = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     scan = relationship("Scan", back_populates="violations")
 
@@ -246,10 +256,11 @@ class ReviewTask(Base):
     framework = Column(String(50), nullable=False)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     reason = Column(String(255), nullable=False)  # low_confidence, evaluation_error, submitted_for_review, ...
-    status = Column(String(50), default="pending_review")  # pending_review, pending_assignment, assigned, in_review, approved, waiting_for_fix, resolved, dismissed, needs_fix
+    status = Column(String(50), default="pending")  # pending, assigned, in_review, approved, resolved, dismissed, changes_requested
     assigned_to = Column(String(255), nullable=True)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     submitted_by = Column(String(255), nullable=True)
+    submitted_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     assigned_by = Column(String(255), nullable=True)
     suggestion_id = Column(Integer, ForeignKey("remediation_suggestions.id", ondelete="SET NULL"), nullable=True)
     due_date = Column(DateTime, nullable=True)
@@ -262,6 +273,25 @@ class ReviewTask(Base):
 
     def __repr__(self) -> str:
         return f"<ReviewTask id={self.id} scan={self.scan_id} rule={self.rule_id} status={self.status}>"
+
+
+class ReviewTaskEvent(Base):
+    """Immutable audit trail of every state transition on a review task."""
+    __tablename__ = "review_task_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, ForeignKey("review_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type = Column(String(50), nullable=False)
+    old_value = Column(String(255), nullable=True)
+    new_value = Column(String(255), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+    def __repr__(self) -> str:
+        return f"<ReviewTaskEvent id={self.id} task={self.task_id} type='{self.event_type}'>"
 
 
 class RemediationSuggestion(Base):
@@ -448,4 +478,20 @@ class Notification(Base):
 
     def __repr__(self) -> str:
         return f"<Notification id={self.id} user={self.user_id} type='{self.type}' read={self.read}>"
+
+
+class RoleAssignmentTracker(Base):
+    """Tracks the last user assigned per role per organization for round-robin distribution."""
+    __tablename__ = "role_assignment_tracker"
+
+    id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(50), nullable=False)
+    last_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "role", name="uq_org_role_tracker"),
+    )
 

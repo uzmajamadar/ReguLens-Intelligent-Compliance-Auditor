@@ -119,7 +119,6 @@ def register(req: RegisterRequest, request: Request, db: Session = Depends(get_d
     token = create_access_token({"sub": str(user.id), "role": user.role})
     log_audit(db, user.id, "register", "user", user.id,
               f"User {user.email} registered org '{org.name}'", request.client.host)
-    db.commit()
 
     return LoginResponse(
         access_token=token,
@@ -155,7 +154,6 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
     db.add(reset)
     log_audit(db, user.id, "password_reset_request", "user", user.id,
               f"Password reset requested for {user.email}")
-    db.commit()
 
     reset_url = f"{settings.app_url}/reset-password?token={token_str}"
     body = (
@@ -211,7 +209,6 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     reset.used = True
     log_audit(db, user.id, "password_reset", "user", user.id,
               f"Password reset completed for {user.email}")
-    db.commit()
     return {"message": "Password reset successfully."}
 
 
@@ -242,8 +239,6 @@ def update_profile(
     db.flush()
     log_audit(db, current_user.id, "profile_update", "user", current_user.id,
               f"Profile updated for {current_user.email}")
-    db.commit()
-    db.refresh(current_user)
     return UserResponse(
         id=current_user.id, name=current_user.name, email=current_user.email,
         role=current_user.role, organization_id=current_user.organization_id,

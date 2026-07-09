@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, log_audit, require_role
+from app.auth import Permission, get_current_user, log_audit, require_permission, scope_document_owner
 from app.file_storage import delete as delete_file, exists as file_exists, read_bytes as read_file
 from app.database import get_db
 from app.diff_engine import compute_diff
@@ -32,9 +32,17 @@ _SEVERITY_DEDUCTIONS = {
     "none": 0, "low": 3, "medium": 7, "high": 12, "critical": 20,
 }
 
+_GRADE_THRESHOLDS = [
+    (90, "A"),
+    (75, "B"),
+    (60, "C"),
+    (45, "D"),
+    (0,  "F"),
+]
+
 
 def _recalculate_scan_score(scan: Scan, db: Session) -> int:
-    """Recalculate a scan's score and violation_count from its persisted violations.
+    """Recalculate a scan's score, grade and violation_count from its persisted violations.
     Fixes stale scores from previous bugs where score was computed
     from all engine results instead of only confirmed violations.
     """
@@ -47,6 +55,11 @@ def _recalculate_scan_score(scan: Scan, db: Session) -> int:
     if recalculated != scan.score:
         scan.score = recalculated
         db.flush()
+    # Also recalculate grade so it stays consistent with the score
+    grade = next(g for threshold, g in _GRADE_THRESHOLDS if recalculated >= threshold)
+    if grade != scan.grade:
+        scan.grade = grade
+        db.flush()
     return recalculated
 
 
@@ -56,8 +69,7 @@ def _get_document_for_user(db: Session, document_id: int, user: User):
         Document.id == document_id,
         Document.organization_id == user.organization_id,
     )
-    if user.role == "employee":
-        q = q.filter(Document.user_id == user.id)
+    q = scope_document_owner(q, user, Document)
     doc = q.first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -199,6 +211,62 @@ class DeleteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+@router.get(
+    "/my-tasks",
+    summary="List documents with pending changes-requested review tasks for the current user",
+)
+def list_my_review_tasks(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    tasks = (
+        db.query(ReviewTask)
+        .join(Document, ReviewTask.document_id == Document.id)
+        .filter(
+            ReviewTask.status == "changes_requested",
+            (ReviewTask.submitted_by_id == current_user.id) | (Document.user_id == current_user.id),
+        )
+        .all()
+    )
+    doc_ids = list({t.document_id for t in tasks})
+    if not doc_ids:
+        return []
+    docs = (
+        db.query(Document)
+        .filter(Document.id.in_(doc_ids))
+        .order_by(Document.upload_time.desc())
+        .all()
+    )
+    doc_map = {d.id: d for d in docs}
+    doc_tasks: dict[int, list[dict]] = {}
+    for t in tasks:
+        doc_tasks.setdefault(t.document_id, []).append({
+            "task_id": t.id,
+            "rule_name": t.rule_name,
+            "framework": t.framework,
+            "notes": t.notes,
+            "assigned_to": t.assigned_to,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+
+    result = []
+    for d_id, pending in doc_tasks.items():
+        d = doc_map.get(d_id)
+        if not d:
+            continue
+        result.append({
+            "document_id": d.id,
+            "original_filename": d.original_filename,
+            "version_number": d.version_number,
+            "status": d.status,
+            "frameworks": json.loads(d.frameworks) if d.frameworks else [],
+            "pending_tasks": pending,
+            "pending_count": len(pending),
+        })
+
+    return result
+
+
 @router.get("/{document_id}", response_model=DocumentInfo)
 def get_document(
     document_id: int,
@@ -228,12 +296,10 @@ def update_document_frameworks(
     document_id: int,
     body: FrameworksUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.DOCUMENT_UPDATE_FRAMEWORKS)),
 ):
     doc = _get_document_for_user(db, document_id, current_user)
     doc.frameworks = json.dumps(body.frameworks) if body.frameworks else None
-    db.commit()
-    db.refresh(doc)
     log_audit(db, current_user.id, "update_frameworks",
               f"Updated frameworks for document {document_id}: {body.frameworks}")
     return DocumentInfo(
@@ -257,7 +323,7 @@ def update_document_frameworks(
 def delete_document(
     document_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin", "compliance_manager", "reviewer")),
+    current_user: User = Depends(require_permission(Permission.DOCUMENT_DELETE)),
 ):
     doc = _get_document_for_user(db, document_id, current_user)
 
@@ -275,7 +341,6 @@ def delete_document(
 
     log_audit(db, current_user.id, "delete", f"Deleted document {document_id} ('{doc.filename}')")
     db.delete(doc)
-    db.commit()
     return DeleteResponse(message="Document deleted successfully")
 
 
@@ -293,7 +358,13 @@ def list_document_scans(
         .all()
     )
     result = []
+    now = datetime.utcnow()
     for s in scans:
+        # Mark scans stuck in "running" for more than 30 minutes as failed
+        if s.status == "running" and s.created_at and (now - s.created_at) > timedelta(minutes=30):
+            s.status = "failed"
+            s.completed_at = now
+            db.flush()
         if s.status == "completed" and s.score == 0:
             _recalculate_scan_score(s, db)
         result.append(
@@ -309,7 +380,6 @@ def list_document_scans(
                 completed_at=s.completed_at.isoformat() if s.completed_at else None,
             )
         )
-    db.commit()
     return result
 
 
@@ -415,21 +485,29 @@ def _auto_resolve_fixed_tasks(
     document_id: int,
     current_user: User,
 ):
-    """After a re-scan, auto-resolve waiting_for_fix review tasks whose violations were fixed."""
-    tasks = (
-        db.query(ReviewTask)
-        .filter(
-            ReviewTask.document_id == document_id,
-            ReviewTask.status == "waiting_for_fix",
-        )
-        .all()
-    )
-    if not tasks:
-        return
+    """After a re-scan, auto-resolve approved tasks and auto-resubmit changes_requested tasks whose violations were fixed."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    current_version = doc.version_number if doc else None
 
     scan_id_set = set(scan_ids)
     resolved = 0
-    for task in tasks:
+    resubmitted = 0
+    resubmitted_reviewer_ids = set()
+
+    approved_tasks = (
+        db.query(ReviewTask)
+        .filter(
+            ReviewTask.document_id == document_id,
+            ReviewTask.status == "approved",
+        )
+        .all()
+    )
+    for task in approved_tasks:
+        if current_version:
+            task_scan = db.query(Scan).filter(Scan.id == task.scan_id).first()
+            if task_scan and task_scan.document and task_scan.document.version_number != current_version:
+                continue
+
         still_present = (
             db.query(Violation)
             .filter(
@@ -443,10 +521,54 @@ def _auto_resolve_fixed_tasks(
             task.reviewed_at = datetime.now(timezone.utc)
             resolved += 1
 
+    changes_tasks = (
+        db.query(ReviewTask)
+        .filter(
+            ReviewTask.document_id == document_id,
+            ReviewTask.status == "changes_requested",
+        )
+        .all()
+    )
+    for task in changes_tasks:
+        still_present = (
+            db.query(Violation)
+            .filter(
+                Violation.scan_id.in_(scan_id_set),
+                Violation.rule_id == task.rule_id,
+            )
+            .first()
+        )
+        if not still_present:
+            task.status = "in_review"
+            task.reviewed_at = None
+            resubmitted += 1
+            if task.assigned_to_id:
+                resubmitted_reviewer_ids.add(task.assigned_to_id)
+
     if resolved:
-        db.commit()
+        from app.routers.reviews import _update_document_review_status
+        _update_document_review_status(db, document_id)
         log_audit(db, current_user.id, "review_auto_resolve",
                   details=f"Auto-resolved {resolved} review task(s) for document {document_id} after re-scan")
+
+        from app.notifications import notify_resolved
+        for task in approved_tasks:
+            if task.status == "resolved":
+                notify_resolved(db, task, None)
+
+    if resubmitted:
+        from app.routers.reviews import _update_document_review_status
+        _update_document_review_status(db, document_id)
+        log_audit(db, current_user.id, "review_auto_resubmit",
+                  details=f"Auto-resubmitted {resubmitted} changes_requested task(s) for document {document_id} after re-scan")
+
+        from app.notifications import notify_auto_resubmitted
+        for reviewer_id in resubmitted_reviewer_ids:
+            reviewer = db.query(User).filter(User.id == reviewer_id).first() if reviewer_id else None
+            if reviewer:
+                matching_tasks = [t for t in changes_tasks if t.assigned_to_id == reviewer_id]
+                for t in matching_tasks:
+                    notify_auto_resubmitted(db, t, reviewer)
 
 
 def _save_rule_result(
@@ -525,8 +647,9 @@ def _save_rule_result(
             framework=r.regulation,
             document_id=document_id,
             reason=reason,
-            status="pending_review",
+            status="pending",
             submitted_by=current_user.name if current_user else None,
+            submitted_by_id=current_user.id if current_user else None,
             due_date=datetime.now(timezone.utc) + timedelta(days=7),
         ))
         return 1
@@ -552,7 +675,87 @@ def _save_rule_result(
     return v_count, rt_count
 
 
-@router.post("/{document_id}/scan", response_model=ScanSummary | MultiScanSummary)
+def _run_auto_scan(
+    db: Session,
+    document_id: int,
+    frameworks: list[str],
+    current_user: User,
+) -> str | None:
+    """Internal scan helper — called after upload or programmatically. Returns status ('scanned' or None on failure)."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc or not GROQ_API_KEY:
+        return None
+
+    coll = doc.collection_name or COLLECTION_NAME
+    scan_group_id = str(uuid.uuid4())
+    scan_records: dict[str, Scan] = {}
+    total_violations = 0
+
+    for fw in frameworks:
+        scan_records[fw] = Scan(
+            document_id=document_id,
+            scan_group_id=scan_group_id,
+            framework=fw,
+            status="running",
+        )
+        db.add(scan_records[fw])
+    db.flush()
+
+    try:
+        from app.compliance_engine import run_multi_framework_audit
+        report = run_multi_framework_audit(
+            collection_name=coll,
+            groq_api_key=GROQ_API_KEY,
+            frameworks=frameworks,
+            top_k_per_rule=2,
+            document_id=document_id,
+        )
+
+        for fw in frameworks:
+            scan = scan_records[fw]
+            fw_report = report.per_framework.get(fw)
+            if fw_report:
+                fw_violations = 0
+                fw_deductions = 0
+                for r in fw_report.results:
+                    v, _ = _save_rule_result(db, scan, document_id, r, current_user)
+                    fw_violations += v
+                    if r.violation:
+                        fw_deductions += r.points_deducted
+                scan.status = "completed"
+                scan.score = max(0, 100 - fw_deductions)
+                scan.grade = fw_report.grade
+                scan.violation_count = fw_violations
+                scan.completed_at = datetime.now(timezone.utc)
+                total_violations += fw_violations
+            else:
+                scan.status = "completed"
+                scan.score = 0
+                scan.grade = "F"
+                scan.completed_at = datetime.now(timezone.utc)
+
+        for fw in frameworks:
+            create_workflow_instance(db, document_id, scan_records[fw].id, fw)
+
+    except Exception:
+        db.rollback()
+        for s in scan_records.values():
+            s.status = "failed"
+        logger.exception("Auto-scan failed for document %d", document_id)
+        return None
+
+    _auto_resolve_fixed_tasks(db, [s.id for s in scan_records.values()], document_id, current_user)
+    doc.status = "scanned"
+    log_audit(db, current_user.id, "auto_scan",
+              f"Auto-scan document {document_id} — frameworks={frameworks} violations={total_violations}")
+
+    from app.notifications import notify_scan_complete
+    for fw in frameworks:
+        notify_scan_complete(db, doc, fw)
+    return "scanned"
+
+
+@router.post("/{document_id}/actions/scan", response_model=ScanSummary | MultiScanSummary)
 def run_document_scan(
     document_id: int,
     framework: str = Query("GDPR", description="Compliance framework (single, e.g. GDPR)"),
@@ -560,7 +763,7 @@ def run_document_scan(
     custom_name: str | None = Query(None, description="Custom regulation name"),
     custom_description: str | None = Query(None, description="Custom regulation check description"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin", "compliance_manager", "reviewer")),
+    current_user: User = Depends(require_permission(Permission.DOCUMENT_SCAN)),
 ):
     doc = _get_document_for_user(db, document_id, current_user)
 
@@ -587,9 +790,6 @@ def run_document_scan(
                 status="running",
             )
             db.add(scan_records[fw])
-        db.commit()
-        for s in scan_records.values():
-            db.refresh(s)
 
         # Build custom rule if provided
         extra_rules = None
@@ -615,7 +815,7 @@ def run_document_scan(
                 collection_name=coll,
                 groq_api_key=GROQ_API_KEY,
                 frameworks=fw_list,
-                top_k_per_rule=3,
+                top_k_per_rule=2,
                 document_id=document_id,
                 extra_rules=extra_rules,
             )
@@ -631,7 +831,7 @@ def run_document_scan(
                     for r in fw_report.results:
                         v, _ = _save_rule_result(db, scan, document_id, r, current_user)
                         fw_violations += v
-                        if _determine_eval_status(r) == "failed":
+                        if r.violation:
                             fw_deductions += r.points_deducted
                     scan.status = "completed"
                     scan.score = max(0, 100 - fw_deductions)
@@ -649,28 +849,30 @@ def run_document_scan(
                 scan = scan_records[fw]
                 create_workflow_instance(db, document_id, scan.id, fw)
 
-            db.commit()
-
-            _auto_resolve_fixed_tasks(
-                db,
-                [s.id for s in scan_records.values()],
-                document_id,
-                current_user,
-            )
-
-            logger.info(
-                "Multi-scan %s for document %d — unified=%d grade=%s frameworks=%d violations=%d",
-                scan_group_id, document_id,
-                int(report.unified_score), report.unified_grade,
-                len(fw_list), total_violations,
-            )
-
         except Exception as exc:
             for s in scan_records.values():
                 s.status = "failed"
-            db.commit()
             logger.exception("Multi-scan failed for document %d", document_id)
             raise HTTPException(status_code=500, detail=f"Scan failed: {exc}") from exc
+
+        _auto_resolve_fixed_tasks(
+            db,
+            [s.id for s in scan_records.values()],
+            document_id,
+            current_user,
+        )
+        doc.status = "scanned"
+
+        from app.notifications import notify_scan_complete
+        for fw in fw_list:
+            notify_scan_complete(db, doc, fw)
+
+        logger.info(
+            "Multi-scan %s for document %d — unified=%d grade=%s frameworks=%d violations=%d",
+            scan_group_id, document_id,
+            int(report.unified_score), report.unified_grade,
+            len(fw_list), total_violations,
+        )
 
         log_audit(
             db, current_user.id, "scan",
@@ -707,8 +909,7 @@ def run_document_scan(
         status="running",
     )
     db.add(scan)
-    db.commit()
-    db.refresh(scan)
+    db.flush()
 
     try:
         from app.compliance_engine import run_audit
@@ -716,7 +917,7 @@ def run_document_scan(
         report = run_audit(
             collection_name=coll,
             groq_api_key=GROQ_API_KEY,
-            top_k_per_rule=3,
+            top_k_per_rule=2,
             regulation=regulation,
             document_id=document_id,
         )
@@ -726,7 +927,7 @@ def run_document_scan(
         for r in report.results:
             v, _ = _save_rule_result(db, scan, document_id, r, current_user)
             violations_created += v
-            if _determine_eval_status(r) == "failed":
+            if r.violation:
                 failed_deductions += r.points_deducted
 
         scan.status = "completed"
@@ -737,15 +938,16 @@ def run_document_scan(
 
         create_workflow_instance(db, document_id, scan.id, scan.framework)
 
-        db.commit()
-        db.refresh(scan)
-
         _auto_resolve_fixed_tasks(
             db,
             [scan.id],
             document_id,
             current_user,
         )
+        doc.status = "scanned"
+
+        from app.notifications import notify_scan_complete
+        notify_scan_complete(db, doc, scan.framework)
 
         log_audit(
             db, current_user.id, "scan",
@@ -758,7 +960,6 @@ def run_document_scan(
 
     except Exception as exc:
         scan.status = "failed"
-        db.commit()
         logger.exception("Scan %d failed for document %d", scan.id, document_id)
         raise HTTPException(status_code=500, detail=f"Scan failed: {exc}") from exc
 
@@ -961,8 +1162,7 @@ def list_documents(
         db.query(Document)
         .filter(Document.organization_id == current_user.organization_id)
     )
-    if current_user.role == "employee":
-        docs = docs.filter(Document.user_id == current_user.id)
+    docs = scope_document_owner(docs, current_user, Document)
     docs = docs.order_by(Document.upload_time.desc()).all()
     return [
         {
@@ -1029,7 +1229,7 @@ def view_document(
 
 
 @router.post(
-    "/{document_id}/versions/{version_id}/export",
+    "/{document_id}/versions/{version_id}/actions/export",
     summary="Export version text as PDF report",
 )
 def export_version_pdf(

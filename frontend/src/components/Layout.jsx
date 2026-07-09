@@ -5,7 +5,7 @@ export default function Layout() {
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
-      <main className="flex-1 overflow-auto bg-background p-8">
+      <main className="flex-1 overflow-auto bg-background">
         <Outlet />
       </main>
     </div>

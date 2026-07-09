@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, log_audit, require_role
+from app.auth import Permission, _ROLE_PERMISSIONS, get_current_user, log_audit, require_permission
 from app.database import get_db
 from app.models import (
     Document, Notification, Scan, User, Workflow, WorkflowInstance,
@@ -167,7 +167,7 @@ def list_workflows(
 def create_workflow(
     req: WorkflowCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.WORKFLOW_CREATE)),
 ):
     wf = Workflow(
         organization_id=current_user.organization_id,
@@ -179,8 +179,6 @@ def create_workflow(
     db.flush()
     log_audit(db, current_user.id, "workflow_create", "workflow", wf.id,
               f"Created workflow '{wf.name}'")
-    db.commit()
-    db.refresh(wf)
     return WorkflowOut(
         id=wf.id, name=wf.name, framework=wf.framework,
         description=wf.description, is_active=wf.is_active,
@@ -227,7 +225,6 @@ def mark_notification_read(
     if not n:
         raise HTTPException(status_code=404, detail="Notification not found")
     n.read = True
-    db.commit()
     return {"message": "Notification marked as read."}
 
 
@@ -240,7 +237,6 @@ def mark_all_notifications_read(
         Notification.user_id == current_user.id,
         Notification.read.is_(False),
     ).update({"read": True})
-    db.commit()
     return {"message": "All notifications marked as read."}
 
 
@@ -288,7 +284,7 @@ def add_workflow_step(
     workflow_id: int,
     req: WorkflowStepCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.WORKFLOW_UPDATE)),
 ):
     wf = db.query(Workflow).filter(
         Workflow.id == workflow_id,
@@ -309,8 +305,6 @@ def add_workflow_step(
     db.flush()
     log_audit(db, current_user.id, "workflow_step_add", "workflow_step", step.id,
               f"Added step '{step.name}' to workflow '{wf.name}'")
-    db.commit()
-    db.refresh(step)
     return WorkflowStepSchema(
         id=step.id, name=step.name, order=step.order,
         assigned_role=step.assigned_role, step_type=step.step_type, config=step.config,
@@ -322,7 +316,7 @@ def add_workflow_transition(
     workflow_id: int,
     req: WorkflowTransitionCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.WORKFLOW_UPDATE)),
 ):
     wf = db.query(Workflow).filter(
         Workflow.id == workflow_id,
@@ -342,8 +336,6 @@ def add_workflow_transition(
     db.flush()
     log_audit(db, current_user.id, "workflow_transition_add", "workflow_transition", transition.id,
               f"Added transition to workflow '{wf.name}'")
-    db.commit()
-    db.refresh(transition)
     return WorkflowTransitionSchema(
         id=transition.id, source_step_id=transition.source_step_id,
         target_step_id=transition.target_step_id,
@@ -546,13 +538,21 @@ def act_on_task(
         raise HTTPException(status_code=403, detail="This task is not assigned to you")
 
     step = db.query(WorkflowStep).filter(WorkflowStep.id == task.step_id).first()
-    if step and step.assigned_role and current_user.role != step.assigned_role:
-        raise HTTPException(status_code=403, detail=f"Your role '{current_user.role}' does not match the required role '{step.assigned_role}' for this step")
+    if step and step.assigned_role:
+        if current_user.role == "admin":
+            pass
+        else:
+            user_perms = _ROLE_PERMISSIONS.get(current_user.role, set())
+            required_perms = _ROLE_PERMISSIONS.get(step.assigned_role, set())
+            if not user_perms.issuperset(required_perms):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Your role '{current_user.role}' does not have sufficient permissions for this step"
+                )
 
     instance = complete_task(db, task_id, req.status, current_user.id, req.notes)
     log_audit(db, current_user.id, "workflow_task_complete", "workflow_task", task_id,
               f"Task {task_id} completed with status '{req.status}'")
-    db.commit()
 
     return {"message": f"Task completed with status '{req.status}'.", "task_id": task_id, "status": req.status}
 
@@ -567,12 +567,11 @@ def create_manual_workflow_instance(
     document_id: int,
     framework: str | None = Query(None, description="Framework to select workflow"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role("admin")),
+    current_user: User = Depends(require_permission(Permission.WORKFLOW_INSTANCE_CREATE)),
 ):
     inst = create_workflow_instance(db, document_id, None, framework)
     if not inst:
         raise HTTPException(status_code=400, detail="No matching workflow found for this document/framework.")
     log_audit(db, current_user.id, "workflow_instance_create", "workflow_instance", inst.id,
               f"Created workflow instance for document {document_id}")
-    db.commit()
     return {"message": "Workflow instance created.", "instance_id": inst.id}

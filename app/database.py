@@ -3,7 +3,10 @@ database.py — SQLAlchemy engine + session factory (supports SQLite and Postgre
 """
 import logging
 import os
-from sqlalchemy import create_engine, text
+import warnings
+
+from sqlalchemy import create_engine
+from sqlalchemy import exc as sa_exc
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from dotenv import load_dotenv
 
@@ -22,37 +25,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Base(DeclarativeBase):
     pass
-
-
-def run_sqlite_migrations():
-    """Add columns that may not exist in older SQLite databases (dev only)."""
-    if not IS_SQLITE:
-        logger.info("Skipping SQLite-specific migrations — using PostgreSQL.")
-        return
-    with engine.connect() as conn:
-        table_result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-        existing_tables = {row[0] for row in table_result.fetchall()}
-
-        def _ensure_column(table, col, col_type):
-            if table not in existing_tables:
-                return
-            result = conn.execute(text(f"PRAGMA table_info({table})"))
-            existing_cols = {row[1] for row in result.fetchall()}
-            if col not in existing_cols:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
-                logger.info("Migration: added %s.%s (%s)", table, col, col_type)
-
-        _ensure_column("violations", "confidence", "INTEGER")
-        _ensure_column("violations", "source_chunks", "TEXT")
-        _ensure_column("violations", "page_number", "INTEGER")
-        _ensure_column("documents", "user_id", "INTEGER")
-        _ensure_column("documents", "organization_id", "INTEGER")
-        _ensure_column("documents", "file_path", "VARCHAR(512)")
-        _ensure_column("documents", "frameworks", "TEXT")
-        _ensure_column("conversations", "user_id", "INTEGER")
-        _ensure_column("review_tasks", "assigned_to_id", "INTEGER")
-
-        conn.commit()
 
 
 def seed_default_admin():
@@ -95,16 +67,28 @@ def seed_default_admin():
         logger.info("Seeded default workflows for org '%s'", org.name)
 
     except Exception as exc:
-        db.rollback()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=sa_exc.SAWarning)
+            db.rollback()
         logger.warning("Seed skipped: %s", exc)
     finally:
         db.close()
 
 
 def get_db():
-    """FastAPI dependency that yields a DB session and closes it after the request."""
+    """FastAPI dependency that yields a DB session with automatic commit/rollback.
+
+    Commits on success, rolls back on exception, and always closes the session.
+    This eliminates the need for scattered ``db.commit()`` calls in route handlers.
+    """
     db = SessionLocal()
     try:
         yield db
+        db.commit()
+    except Exception:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=sa_exc.SAWarning)
+            db.rollback()
+        raise
     finally:
         db.close()

@@ -44,14 +44,11 @@ def send_message(
         if payload.document_id:
             conversation.document_id = payload.document_id
         db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
+        db.flush()
     elif payload.document_id and conversation.document_id is None:
         conversation.document_id = payload.document_id
-        db.commit()
 
     db.add(Message(conversation_id=conversation.id, role="user", content=payload.content))
-    db.commit()
 
     doc_text = ""
     doc_id = payload.document_id or conversation.document_id

@@ -29,9 +29,9 @@ class UploadResponse(BaseModel):
     document_id: int
     filename: str
     file_size_bytes: int
-    page_count: int
-    total_chunks: int
-    has_ocr_pages: bool
+    page_count: int | None = None
+    total_chunks: int | None = None
+    has_ocr_pages: bool | None = None
     status: str
     collection_name: str
     upload_time: str
@@ -46,6 +46,7 @@ def _get_or_create_group_id(db: Session, original_filename: str, organization_id
         .filter(
             Document.original_filename == original_filename,
             Document.organization_id == organization_id,
+            Document.status != "deleted",
         )
         .order_by(Document.version_number.desc())
         .first()
@@ -88,6 +89,35 @@ async def upload_pdf(
             detail=f"File exceeds the 50 MB limit ({len(file_bytes) / 1_048_576:.1f} MB received).",
         )
 
+    # ── Compute content hash for deduplication ─────────────────────────
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # Check for duplicate
+    existing = (
+        db.query(Document)
+        .filter(
+            Document.content_hash == content_hash,
+            Document.organization_id == current_user.organization_id,
+        )
+        .first()
+    )
+    if existing:
+        logger.info("Duplicate upload detected — returning existing document %d", existing.id)
+        return UploadResponse(
+            document_id=existing.id,
+            filename=existing.filename,
+            file_size_bytes=existing.file_size_bytes,
+            page_count=existing.page_count or 0,
+            total_chunks=existing.total_chunks or 0,
+            has_ocr_pages=existing.has_ocr_pages or False,
+            status=existing.status,
+            collection_name=existing.collection_name or COLLECTION_NAME,
+            upload_time=existing.upload_time.isoformat(),
+            version_number=existing.version_number,
+            document_group_id=existing.document_group_id,
+            message="This file has already been uploaded.",
+        )
+
     # ── Determine version group ─────────────────────────────────────────
     group_id, version_number = _get_or_create_group_id(db, file.filename, current_user.organization_id)
 
@@ -98,6 +128,7 @@ async def upload_pdf(
         filename=file.filename,
         original_filename=file.filename,
         file_size_bytes=len(file_bytes),
+        content_hash=content_hash,
         document_group_id=group_id,
         version_number=version_number,
         collection_name=COLLECTION_NAME,
@@ -108,8 +139,7 @@ async def upload_pdf(
         frameworks=json.dumps(framework_list) if framework_list else None,
     )
     db.add(doc)
-    db.commit()
-    db.refresh(doc)
+    db.flush()
 
     logger.info(
         "Document %d created (group=%s v%d) — starting ingestion of '%s'",
@@ -118,7 +148,6 @@ async def upload_pdf(
 
     # ── Save original file to storage (local disk or S3) ──────────────
     doc.file_path = save_file(doc.id, file.filename, file_bytes)
-    db.commit()
 
     # ── Step 1: Extract text + chunk ───────────────────────────────────
     try:
@@ -129,8 +158,6 @@ async def upload_pdf(
         doc.has_ocr_pages = result.has_ocr_pages
         doc.full_text = result.full_text
         doc.status = "ready"
-        db.commit()
-        db.refresh(doc)
 
         logger.info(
             "Document %d extracted: %d pages, %d chunks, OCR=%s",
@@ -140,7 +167,6 @@ async def upload_pdf(
     except (ValueError, RuntimeError) as exc:
         doc.status = "failed"
         doc.error_message = str(exc)
-        db.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
@@ -149,7 +175,6 @@ async def upload_pdf(
     except Exception as exc:
         doc.status = "failed"
         doc.error_message = str(exc)
-        db.commit()
         logger.exception("Unexpected error extracting document %d", doc.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -168,14 +193,26 @@ async def upload_pdf(
             embeddings=embeddings,
         )
         doc.status = "indexed"
-        db.commit()
-        db.refresh(doc)
         logger.info("Document %d indexed into Qdrant collection '%s'.", doc.id, doc.collection_name)
+
+        # ── Auto-trigger scan for each framework assigned to the document ──
+        fw_list = json.loads(doc.frameworks) if doc.frameworks else []
+        if fw_list:
+            from app.routers.versions import _run_auto_scan
+            scan_status = _run_auto_scan(db, doc.id, fw_list, current_user)
+            if scan_status:
+                logger.info("Document %d auto-scanned for frameworks %s.", doc.id, fw_list)
+            else:
+                logger.warning("Auto-scan failed or skipped for document %d", doc.id)
+
+        from app.notifications import notify_upload_complete
+        notify_upload_complete(db, doc)
 
     except Exception as exc:
         logger.exception("Qdrant upsert failed for document %d", doc.id)
+        db.rollback()
 
-    # ── Step 3: Create immutable version snapshot ──────────────────────
+    # ── Step 3 (or 4): Create immutable version snapshot ──────────────────────
     version = DocumentVersion(
         document_id=doc.id,
         version_number=version_number,
@@ -187,7 +224,6 @@ async def upload_pdf(
         full_text=result.full_text,
     )
     db.add(version)
-    db.commit()
     log_audit(db, current_user.id, "upload", f"Uploaded '{file.filename}' (v{version_number}, {doc.total_chunks} chunks)")
 
     return UploadResponse(
@@ -204,7 +240,7 @@ async def upload_pdf(
         document_group_id=doc.document_group_id,
         message=(
             f"PDF ingested and indexed (v{doc.version_number}) into '{doc.collection_name}'."
-            if doc.status == "indexed"
+            if doc.status in ("indexed", "scanned")
             else f"PDF extracted ({doc.total_chunks} chunks) but indexing failed."
         ),
     )

@@ -3,6 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { Users, FileText, Shield, Clock, Activity, UserCog, ClipboardList } from "lucide-react";
 import { Card, CardContent } from "../components/ui/card";
 import { getAdminStats } from "../lib/api";
+import { PageHeader } from "../components/shared/PageHeader";
+import { KpiCard } from "../components/shared/KpiCard";
+import { EmptyState } from "../components/shared/EmptyState";
+import { SkeletonTable } from "../components/shared/SkeletonTable";
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState(null);
@@ -40,24 +44,11 @@ export default function AdminDashboard() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Admin Dashboard</h1>
-        <p className="text-muted-foreground mt-1">Overview of your organization</p>
-      </div>
+      <PageHeader title="Admin Dashboard" description="Overview of your organization" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {cards.map(({ label, value, icon: Icon, color }) => (
-          <Card key={label}>
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className={`w-12 h-12 rounded-lg ${color} flex items-center justify-center shrink-0`}>
-                <Icon className="w-6 h-6 text-white" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-foreground">{value}</p>
-                <p className="text-sm text-muted-foreground">{label}</p>
-              </div>
-            </CardContent>
-          </Card>
+        {cards.map(({ label, value, icon: Icon }) => (
+          <KpiCard key={label} icon={Icon} label={label} value={value} />
         ))}
       </div>
 

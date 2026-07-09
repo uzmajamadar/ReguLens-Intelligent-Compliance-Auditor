@@ -13,8 +13,10 @@ from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import Base, engine, run_sqlite_migrations, seed_default_admin
-from app.routers import admin, auth, compliance, groq, notifications, query, upload, versions, workflows
+from alembic.config import Config as AlembicConfig
+from alembic import command
+from app.database import seed_default_admin
+from app.routers import admin, auth, audits, compliance, groq, notifications, query, remediations, reviews, upload, versions, violations, workflows
 
 # ---------------------------------------------------------------------------
 # Load environment variables from .env
@@ -37,9 +39,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting ReguLens AI — creating database tables if needed…")
-    Base.metadata.create_all(bind=engine)
-    run_sqlite_migrations()
+    logger.info("Starting ReguLens AI — applying Alembic migrations…")
+    alembic_cfg = AlembicConfig("alembic.ini")
+    command.upgrade(alembic_cfg, "head")
     seed_default_admin()
     logger.info("Database ready.")
     yield
@@ -76,7 +78,11 @@ app.include_router(admin.router)
 app.include_router(workflows.router)
 app.include_router(upload.router)
 app.include_router(query.router)
+app.include_router(audits.router)
 app.include_router(compliance.router)
+app.include_router(reviews.router)
+app.include_router(violations.router)
+app.include_router(remediations.router)
 app.include_router(versions.router)
 app.include_router(groq.router)
 app.include_router(notifications.router)

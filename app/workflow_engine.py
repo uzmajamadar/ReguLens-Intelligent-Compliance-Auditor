@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Document, Notification, Scan, User, Violation,
     Workflow, WorkflowInstance, WorkflowStep, WorkflowTask, WorkflowTransition,
+    RoleAssignmentTracker,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,75 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _find_user_by_role(db: Session, role: str, organization_id: int) -> User | None:
-    return db.query(User).filter(
-        User.role == role,
-        User.organization_id == organization_id,
-        User.is_active.is_(True),
-    ).first()
+    users = (
+        db.query(User)
+        .filter(
+            User.role == role,
+            User.organization_id == organization_id,
+            User.is_active.is_(True),
+        )
+        .order_by(User.id)
+        .all()
+    )
+    if not users:
+        return None
+
+    tracker = (
+        db.query(RoleAssignmentTracker)
+        .filter(
+            RoleAssignmentTracker.organization_id == organization_id,
+            RoleAssignmentTracker.role == role,
+        )
+        .first()
+    )
+
+    if tracker and tracker.last_user_id:
+        for i, u in enumerate(users):
+            if u.id == tracker.last_user_id:
+                next_idx = (i + 1) % len(users)
+                next_user = users[next_idx]
+                tracker.last_user_id = next_user.id
+                tracker.updated_at = datetime.now(timezone.utc)
+    return next_user
+
+
+def _notify_admins_orphan_task(db: Session, organization_id: int, step: WorkflowStep, task_id: int) -> None:
+    """Notify all admins in the organization about an unassigned orphan task."""
+    admins = (
+        db.query(User)
+        .filter(
+            User.role == "admin",
+            User.organization_id == organization_id,
+            User.is_active.is_(True),
+        )
+        .all()
+    )
+    for admin in admins:
+        _create_notification(
+            db, admin.id,
+            title=f"Unassigned task: {step.name}",
+            message=f"A workflow task '{step.name}' (task #{task_id}) could not be auto-assigned — no user with role '{step.assigned_role}' exists. Please assign it manually.",
+            type="task_orphaned",
+            resource_type="workflow_task",
+            resource_id=task_id,
+        )
+    logger.warning(
+        "Notified %d admin(s) about orphan task %d (role='%s')",
+        len(admins), task_id, step.assigned_role,
+    )
+
+    # First assignment or tracker not found — pick first user and save
+    next_user = users[0]
+    if tracker:
+        tracker.last_user_id = next_user.id
+        tracker.updated_at = datetime.now(timezone.utc)
+    else:
+        db.add(RoleAssignmentTracker(
+            organization_id=organization_id,
+            role=role,
+            last_user_id=next_user.id,
+        ))
+    return next_user
 
 
 def _create_notification(db: Session, user_id: int, title: str, message: str | None = None,
@@ -211,6 +276,7 @@ def _auto_assign_task(db: Session, instance: WorkflowInstance, step: WorkflowSte
         logger.info("Task %d created for user %d (step='%s')", task.id, user.id, step.name)
     else:
         logger.warning("No user found with role '%s' for task %d", step.assigned_role, task.id)
+        _notify_admins_orphan_task(db, doc.organization_id, step, task.id)
 
     return task
 

@@ -10,7 +10,7 @@ from app.database import get_db
 
 @pytest.fixture
 def org_and_users(test_db):
-    """Create org + admin + reviewer users and return them."""
+    """Create org + admin + reviewer + compliance_manager users."""
     from app.models import Organization, User
 
     org = Organization(name="Review Test Org")
@@ -34,9 +34,18 @@ def org_and_users(test_db):
         organization_id=org.id,
     )
     test_db.add(reviewer)
+
+    manager = User(
+        name="Manager",
+        email="manager@reviewtest.com",
+        password_hash=hash_password("manager123"),
+        role="compliance_manager",
+        organization_id=org.id,
+    )
+    test_db.add(manager)
     test_db.commit()
 
-    return {"org": org, "admin": admin, "reviewer": reviewer}
+    return {"org": org, "admin": admin, "reviewer": reviewer, "manager": manager}
 
 
 @pytest.fixture
@@ -65,6 +74,28 @@ def admin_client(test_db, org_and_users):
 def reviewer_client(test_db, org_and_users):
     """TestClient authenticated as reviewer (via token, no dependency override)."""
     user = org_and_users["reviewer"]
+    token = create_access_token({"sub": str(user.id), "role": user.role})
+
+    def override_get_db():
+        yield test_db
+
+    saved = main.app.dependency_overrides.get(get_current_user)
+    main.app.dependency_overrides[get_db] = override_get_db
+    main.app.dependency_overrides.pop(get_current_user, None)
+    client = TestClient(main.app)
+    client.headers["Authorization"] = f"Bearer {token}"
+    yield client
+    main.app.dependency_overrides.pop(get_db, None)
+    if saved is not None:
+        main.app.dependency_overrides[get_current_user] = saved
+    else:
+        main.app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.fixture
+def manager_client(test_db, org_and_users):
+    """TestClient authenticated as compliance_manager."""
+    user = org_and_users["manager"]
     token = create_access_token({"sub": str(user.id), "role": user.role})
 
     def override_get_db():
@@ -138,29 +169,28 @@ class TestSubmitForReview:
     def test_submit_violation(self, admin_client, scan):
         violation_id = scan["violation"].id
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert "task_id" in data
-        assert data["status"] == "pending_assignment"
+        assert data["status"] == "pending"
 
     def test_submit_already_submitted(self, admin_client, scan):
         violation_id = scan["violation"].id
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         assert resp.status_code == status.HTTP_200_OK
 
-        # Submitting again should fail
+        # Submitting again should succeed — updates existing active task
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert "already exists" in resp.json()["detail"].lower()
+        assert resp.status_code == status.HTTP_200_OK
 
     def test_submit_nonexistent_violation(self, admin_client):
-        resp = admin_client.post("/compliance/violations/99999/submit-review")
+        resp = admin_client.post("/compliance/violations/99999/actions/submit-review")
         assert resp.status_code == status.HTTP_404_NOT_FOUND
 
 
@@ -169,14 +199,14 @@ class TestAssignReview:
         # Submit first
         violation_id = scan["violation"].id
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         task_id = resp.json()["task_id"]
 
         # Assign
         reviewer = org_and_users["reviewer"]
         resp = admin_client.put(
-            f"/admin/review/{task_id}/assign",
+            f"/admin/reviews/{task_id}/actions/assign",
             json={
                 "assigned_to_id": reviewer.id,
                 "note": "Please review this finding",
@@ -188,12 +218,12 @@ class TestAssignReview:
     def test_assign_to_nonexistent_user(self, admin_client, scan):
         violation_id = scan["violation"].id
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         task_id = resp.json()["task_id"]
 
         resp = admin_client.put(
-            f"/admin/review/{task_id}/assign",
+            f"/admin/reviews/{task_id}/actions/assign",
             json={"assigned_to_id": 99999},
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
@@ -205,36 +235,36 @@ class TestReviewWorkflow:
     def _setup(self, admin_client, scan, org_and_users):
         violation_id = scan["violation"].id
         resp = admin_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         task_id = resp.json()["task_id"]
         reviewer = org_and_users["reviewer"]
         admin_client.put(
-            f"/admin/review/{task_id}/assign",
+            f"/admin/reviews/{task_id}/actions/assign",
             json={"assigned_to_id": reviewer.id},
         )
         return task_id
 
-    def test_full_approve_flow(self, admin_client, reviewer_client, scan, org_and_users):
+    def test_full_approve_flow(self, admin_client, reviewer_client, manager_client, scan, org_and_users):
         task_id = self._setup(admin_client, scan, org_and_users)
 
         # Start review
         resp = reviewer_client.post(
-            f"/compliance/review/{task_id}/start-review"
+            f"/compliance/reviews/{task_id}/actions/start"
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["status"] == "in_review"
 
         # Approve
         resp = reviewer_client.post(
-            f"/compliance/review/{task_id}/approve"
+            f"/compliance/reviews/{task_id}/actions/approve"
         )
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json()["status"] == "waiting_for_fix"
+        assert resp.json()["status"] == "approved"
 
-        # Resolve (admin only)
-        resp = admin_client.post(
-            f"/compliance/review/{task_id}/resolve"
+        # Resolve (compliance_manager only)
+        resp = manager_client.post(
+            f"/compliance/reviews/{task_id}/actions/resolve"
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["status"] == "resolved"
@@ -243,11 +273,11 @@ class TestReviewWorkflow:
         task_id = self._setup(admin_client, scan, org_and_users)
 
         # Start review
-        reviewer_client.post(f"/compliance/review/{task_id}/start-review")
+        reviewer_client.post(f"/compliance/reviews/{task_id}/actions/start")
 
         # Reject
         resp = reviewer_client.post(
-            f"/compliance/review/{task_id}/reject?notes=False positive"
+            f"/compliance/reviews/{task_id}/actions/reject?notes=False positive"
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["status"] == "dismissed"
@@ -256,20 +286,20 @@ class TestReviewWorkflow:
         task_id = self._setup(admin_client, scan, org_and_users)
 
         # Start review
-        reviewer_client.post(f"/compliance/review/{task_id}/start-review")
+        reviewer_client.post(f"/compliance/reviews/{task_id}/actions/start")
 
         # Needs fix
         resp = reviewer_client.post(
-            f"/compliance/review/{task_id}/needs-fix?notes=Update clause reference"
+            f"/compliance/reviews/{task_id}/actions/needs-fix?notes=Update clause reference"
         )
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json()["status"] == "needs_fix"
+        assert resp.json()["status"] == "changes_requested"
 
     def test_list_tasks(self, admin_client, scan, org_and_users):
         self._setup(admin_client, scan, org_and_users)
 
         resp = admin_client.get(
-            "/compliance/review?status_filter=assigned"
+            "/compliance/reviews?status_filter=assigned"
         )
         assert resp.status_code == status.HTTP_200_OK
         tasks = resp.json()
@@ -279,10 +309,10 @@ class TestReviewWorkflow:
     def test_review_stats(self, admin_client, scan, org_and_users):
         self._setup(admin_client, scan, org_and_users)
 
-        resp = admin_client.get("/compliance/review/stats")
+        resp = admin_client.get("/compliance/reviews/stats")
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
-        assert "pending_assignment" in data
+        assert "pending" in data
         assert "total" in data
 
     def test_reviewer_cannot_resolve(self, reviewer_client, scan, org_and_users):
@@ -290,13 +320,13 @@ class TestReviewWorkflow:
         # Submit + assign as admin first
         violation_id = scan["violation"].id
         resp = reviewer_client.post(
-            f"/compliance/violations/{violation_id}/submit-review"
+            f"/compliance/violations/{violation_id}/actions/submit-review"
         )
         task_id = resp.json()["task_id"]
 
         # Reviewer can't resolve even if task is in correct state
-        # (task is still pending_assignment, resolve expects waiting_for_fix)
+        # (task is still pending, resolve expects approved)
         resp = reviewer_client.post(
-            f"/compliance/review/{task_id}/resolve"
+            f"/compliance/reviews/{task_id}/actions/resolve"
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN

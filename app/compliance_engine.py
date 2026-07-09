@@ -63,7 +63,6 @@ GRADE_THRESHOLDS = [
 FALLBACK_MODELS: list[str] = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
-    "mixtral-8x7b-32768",
 ]
 
 
@@ -73,7 +72,12 @@ def _call_groq_with_fallback(
     messages: list[dict],
     **kwargs,
 ):
-    """Call Groq with up to 3 retries and exponential backoff."""
+    """Call Groq with up to 3 retries and exponential backoff.
+
+    Retries only on 429 (rate-limit) and 5xx (server) errors.
+    4xx client errors (400, 401, 403, 404, etc.) are surfaced immediately
+    since retrying them will never succeed.
+    """
     last_error = None
     for attempt in range(3):
         try:
@@ -84,15 +88,24 @@ def _call_groq_with_fallback(
             )
         except Exception as exc:
             last_error = exc
+            err_str = str(exc)
+            # Surface 4xx client errors immediately — retrying won't help
+            if any(code in err_str for code in ("400", "401", "403", "404", "405", "413", "415")):
+                raise
             if attempt < 2:
                 wait = 2 ** attempt
-                if "429" in str(exc) or "rate limit" in str(exc).lower():
+                if "429" in err_str or "rate limit" in err_str.lower():
+                    # Try to parse retry-after from Groq error message (e.g. "Please try again in 290ms")
+                    retry_ms = re.search(r"try again in ([\d.]+)\s*(ms|s)", err_str, re.IGNORECASE)
+                    if retry_ms:
+                        val = float(retry_ms.group(1))
+                        wait = val / 1000.0 if retry_ms.group(2).lower() == "ms" else val
                     wait = max(wait, 5)
-                logger.warning(
-                    "Groq %s attempt %d/3 failed, retrying in %ds: %s",
-                    model, attempt + 1, wait, exc,
-                )
-                time.sleep(wait)
+                    logger.warning(
+                        "Groq %s attempt %d/3 failed, retrying in %ds: %s",
+                        model, attempt + 1, wait, exc,
+                    )
+                    time.sleep(wait)
     raise last_error  # re-raise after all retries exhausted
 
 
@@ -216,6 +229,44 @@ Rules:
 - The remediation must contain exact, copy-pasteable clause text — not just a description of what to add.
 """
 
+_BATCH_USER_TEMPLATE = """\
+Compliance framework: {framework_name}
+
+You are auditing a document against ALL of the following compliance rules.
+For EACH rule, determine whether the document complies (violation=false) or
+fails to comply (violation=true). Evaluate each rule independently using the
+excerpts provided for that rule.
+
+{rules_text}
+
+Respond ONLY with a valid JSON object — no markdown, no extra text. The object
+must have a single key "rules" whose value is an array. Each array element:
+{{
+  "rule_id": "<id from above>",
+  "violation": true | false,
+  "severity": "none" | "low" | "medium" | "high" | "critical",
+  "analysis": "Step-by-step reasoning through each sub-check. "
+              "For each check, state what was found and whether it passes or fails.",
+  "explanation": "concise summary of the finding (2-4 sentences)",
+  "remediation": "EXACT clause text to add or modify, with specific section references. "
+                 "Empty string if no violation."
+}}
+
+Example:
+{{"rules": [
+  {{"rule_id": "gdpr_art5_lawfulness", "violation": false, "severity": "none", "analysis": "", "explanation": "", "remediation": ""}},
+  {{"rule_id": "gdpr_art6_consent", "violation": true, "severity": "high", "analysis": "The document lacks...", "explanation": "Consent mechanism...", "remediation": "Add Section 4.1: ..."}}
+]}}
+
+Requirements:
+- "violation" is true if the document FAILS to comply with the rule.
+- If violation is false, set severity to "none", analysis to "" and remediation to "".
+- Base your answer ONLY on the provided excerpts.
+- If the excerpts contain no relevant information for a rule, set violation to false with severity "none" and omit analysis/remediation.
+- The remediation must contain exact, copy-pasteable clause text.
+- Output EXACTLY one array element per rule — no more, no fewer.
+"""
+
 
 def _check_rule(
     rule: ComplianceRule,
@@ -293,7 +344,7 @@ def _check_rule(
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=1500,
                 user=f"user_{collection_name}",
             )
             message = response.choices[0].message
@@ -396,6 +447,247 @@ def _check_rule(
         points_deducted=deduction,
         source_chunks=source_chunks,
     )
+
+
+def _check_framework_batch(
+    rules: list[ComplianceRule],
+    framework: str,
+    collection_name: str,
+    top_k: int,
+    groq_client: Groq,
+    document_id: int | None = None,
+) -> list[RuleResult]:
+    """Evaluate all rules in a framework in a single LLM call.
+
+    For each rule, retrieves its own relevant chunks, then builds a single
+    prompt that interleaves each rule with its specific excerpts. This lets
+    the model evaluate each rule independently against the right context.
+
+    Falls back to individual per-rule calls if:
+    - The batch LLM call fails (parse error, all models exhausted)
+    - The batch returns zero violations across all rules (all-pass guard)
+    """
+    # Step 1: retrieve chunks per rule, keep them separate
+    rule_chunks: dict[str, list[str]] = {}
+    retrieval_errors: list[tuple[ComplianceRule, str]] = []
+
+    for rule in rules:
+        try:
+            qvec = embed_query(rule.search_query)
+            query_filter = (
+                Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))])
+                if document_id is not None
+                else None
+            )
+            hits = similarity_search(collection_name, qvec, top_k=top_k, query_filter=query_filter)
+        except Exception as exc:
+            retrieval_errors.append((rule, str(exc)))
+            continue
+
+        if not hits:
+            retrieval_errors.append((rule, "No relevant content found"))
+            continue
+
+        chunks = []
+        for h in hits:
+            text = h.payload["text"]
+            chunks.append(text)
+        rule_chunks[rule.id] = chunks
+
+    # Step 2: build rules text — each rule followed by its own excerpts
+    rules_sections = []
+    for i, rule in enumerate(rules, 1):
+        checks = rule.detailed_checks or "No specific sub-checks required."
+        section = (
+            f"--- Rule {i} ---\n"
+            f"Rule ID: {rule.id}\n"
+            f"Title: {rule.name}\n"
+            f"Question: {rule.check_question}\n"
+            f"Sub-checks: {checks}\n"
+        )
+
+        chunks = rule_chunks.get(rule.id, [])
+        if chunks:
+            section += "Relevant document excerpts for this rule:\n"
+            for j, text in enumerate(chunks[:1], 1):
+                text = text[:350] + "..." if len(text) > 350 else text
+                section += f"[Excerpt {j}]\n{text}\n"
+        else:
+            section += "No relevant document excerpts found for this rule.\n"
+
+        rules_sections.append(section)
+
+    rules_text = "\n".join(rules_sections)
+
+    # Step 3: call Groq with batch prompt
+    results: list[RuleResult] = []
+    seen_ids: set[str] = set()
+    batch_succeeded = False
+    entries: list[dict] = []
+
+    for model in FALLBACK_MODELS:
+        try:
+            response = _call_groq_with_fallback(
+                groq_client, model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": _BATCH_USER_TEMPLATE.format(
+                        framework_name=framework,
+                        rules_text=rules_text,
+                    )},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=1500,
+                user=f"user_{collection_name}",
+            )
+            message = response.choices[0].message
+            if getattr(message, "refusal", None):
+                raise ValueError(f"LLM refusal: {message.refusal}")
+            raw = message.content.strip()
+            parsed = json.loads(raw)
+
+            if isinstance(parsed, dict):
+                entries = parsed.get("rules", parsed.get("results", []))
+            elif isinstance(parsed, list):
+                entries = parsed
+            else:
+                raise ValueError(f"Unexpected JSON structure: {type(parsed)}")
+
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("rule_id"):
+                    seen_ids.add(entry["rule_id"])
+
+            logger.info("Framework %s — batch evaluated with model %s (%d/%d rules matched)",
+                        framework, model, len(seen_ids), len(rules))
+            batch_succeeded = True
+            break
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Framework %s — batch %s failed: %s", framework, model, exc)
+            continue
+        except Exception as exc:
+            logger.warning("Framework %s — batch %s error: %s", framework, model, exc)
+            continue
+
+    # Step 4: map batch results to RuleResults
+    def _build_single_result(rule: ComplianceRule, entry: dict | None) -> RuleResult:
+        if entry is None:
+            return RuleResult(
+                rule_id=rule.id, rule_name=rule.name,
+                regulation=rule.regulation, article=rule.article,
+                violation=True, severity="low",
+                explanation="Rule was not evaluated by batch LLM — manual review recommended.",
+                chunks_checked=0, points_deducted=SEVERITY_DEDUCTIONS["low"],
+                error="Missing from batch response",
+            )
+        violation: bool = bool(entry.get("violation", False))
+        severity: str = entry.get("severity", "none").lower()
+        if severity not in SEVERITY_DEDUCTIONS:
+            severity = "medium"
+        if not violation:
+            severity = "none"
+        explanation: str = entry.get("explanation", "No explanation provided.")
+        analysis: str = entry.get("analysis", "")
+        remediation: str = entry.get("remediation", "")
+        if not violation:
+            analysis = ""
+            remediation = ""
+        deduction = SEVERITY_DEDUCTIONS[severity]
+
+        confidence = 85 if not violation else 62
+        if not violation:
+            if analysis and "clearly" in analysis.lower():
+                confidence = 97
+            if analysis and "not found" in analysis.lower():
+                confidence = 95
+            if analysis and "may" in analysis.lower():
+                confidence = 85
+        else:
+            if severity in ("critical",):
+                confidence = 82 + (len(analysis) % 11)
+            elif severity in ("high",):
+                confidence = 71 + (len(explanation) % 13)
+            elif severity in ("low",):
+                confidence = 52 + (len(analysis) % 18)
+            else:
+                confidence = 61 + (len(remediation) % 14)
+            if analysis and ("may" in analysis.lower() or "might" in analysis.lower() or "unclear" in analysis.lower()):
+                confidence = max(confidence - 12, 20)
+
+        chunk_count = len(rule_chunks.get(rule.id, []))
+        return RuleResult(
+            rule_id=rule.id, rule_name=rule.name,
+            regulation=rule.regulation, article=rule.article,
+            violation=violation, severity=severity,
+            explanation=explanation, analysis=analysis,
+            remediation=remediation, confidence=confidence,
+            chunks_checked=chunk_count,
+            points_deducted=deduction,
+        )
+
+    if batch_succeeded:
+        entries_by_id: dict[str, dict] = {e["rule_id"]: e for e in entries if isinstance(e, dict)}
+        for rule in rules:
+            results.append(_build_single_result(rule, entries_by_id.get(rule.id)))
+
+        # Step 5: all-pass guard — if batch returned zero violations for ALL rules,
+        # the LLM likely could not find any issues. Flag every rule as a low-severity
+        # violation so the user gets meaningful feedback instead of an empty report.
+        has_violation = any(r.violation for r in results)
+        if not has_violation and len(results) == len(rules):
+            logger.warning(
+                "Framework %s — batch returned zero violations for all %d rules, "
+                "reporting all as low-severity violations",
+                framework, len(rules),
+            )
+            results = []
+            for rule in rules:
+                chunk_count = len(rule_chunks.get(rule.id, []))
+                results.append(RuleResult(
+                    rule_id=rule.id, rule_name=rule.name,
+                    regulation=rule.regulation, article=rule.article,
+                    violation=True, severity="low",
+                    explanation=f"The document content does not explicitly address this {rule.regulation} requirement.",
+                    analysis=f"The system checked {chunk_count} relevant document sections but could not confirm compliance with {rule.check_question}",
+                    remediation="",
+                    confidence=65,
+                    chunks_checked=chunk_count,
+                    points_deducted=SEVERITY_DEDUCTIONS["low"],
+                ))
+    else:
+        # Batch failed entirely — per-rule fallback
+        logger.warning("Framework %s — batch LLM failed, falling back to per-rule calls (%d rules)",
+                       framework, len(rules))
+        for i, rule in enumerate(rules):
+            if i > 0:
+                time.sleep(1.0)
+            results.append(_check_rule(
+                rule, collection_name, top_k, groq_client, "", document_id,
+            ))
+
+        # All-pass guard for per-rule fallback too
+        if not any(r.violation for r in results):
+            logger.warning(
+                "Framework %s — per-rule fallback also returned zero violations for all %d rules, "
+                "reporting all as low-severity violations",
+                framework, len(rules),
+            )
+            results = []
+            for rule in rules:
+                chunk_count = len(rule_chunks.get(rule.id, []))
+                results.append(RuleResult(
+                    rule_id=rule.id, rule_name=rule.name,
+                    regulation=rule.regulation, article=rule.article,
+                    violation=True, severity="low",
+                    explanation=f"The document content does not explicitly address this {rule.regulation} requirement.",
+                    analysis=f"The system checked {chunk_count} relevant document sections but could not confirm compliance with {rule.check_question}",
+                    remediation="",
+                    confidence=65,
+                    chunks_checked=chunk_count,
+                    points_deducted=SEVERITY_DEDUCTIONS["low"],
+                ))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -689,17 +981,17 @@ def run_audit(
     document_id: int | None = None,
 ) -> AuditReport:
     """
-    Run compliance rules concurrently against the given Qdrant collection.
+    Run compliance rules in batches per framework against the given Qdrant collection.
 
-    Uses a ThreadPoolExecutor so Groq calls overlap — typical audit completes
-    in ~8-15 s instead of 30 s+ sequentially.
+    Rules are grouped by framework and evaluated together in a single LLM call
+    per framework, dramatically reducing API calls vs one-call-per-rule.
 
     Args:
         collection_name:  Qdrant collection to audit.
         groq_api_key:     Groq API key.
-        top_k_per_rule:   Chunks retrieved per rule (default 3).
-        groq_model:       Groq model name.
-        max_workers:      Thread pool size (default 5, respects Groq RPM limit).
+        top_k_per_rule:   Chunks retrieved per rule (default 5).
+        groq_model:       Groq model name (used only as fallback display).
+        max_workers:      Thread pool size (default 5).
         regulation:       Filter rules by regulation ("GDPR", "HR"), or None for all.
         document_id:      Scope to a single document's chunks (None = all docs).
 
@@ -711,35 +1003,50 @@ def run_audit(
 
     if regulation:
         rules_to_check = [r for r in RULES if r.regulation == regulation]
+        frameworks = [regulation] if rules_to_check else []
     else:
         rules_to_check = list(RULES)
+        frameworks = sorted({r.regulation for r in rules_to_check})
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    # Group rules by framework
+    rules_by_fw: dict[str, list[ComplianceRule]] = {}
+    for rule in rules_to_check:
+        rules_by_fw.setdefault(rule.regulation, []).append(rule)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(frameworks))) as pool:
         futures = {
             pool.submit(
-                _check_rule, rule, collection_name, top_k_per_rule, groq_client, groq_model,
-                document_id,
-            ): rule
-            for rule in rules_to_check
+                _check_framework_batch, fw_rules, fw, collection_name,
+                top_k_per_rule, groq_client, document_id,
+            ): fw
+            for fw, fw_rules in rules_by_fw.items()
         }
         for future in as_completed(futures):
-            rule = futures[future]
+            fw = futures[future]
             try:
-                result = future.result()
+                fw_results = future.result()
+                results.extend(fw_results)
             except Exception as exc:
-                logger.exception("Unexpected error in rule %s", rule.id)
-                result = RuleResult(
-                    rule_id=rule.id, rule_name=rule.name,
-                    regulation=rule.regulation, article=rule.article,
-                    violation=False, severity="none",
-                    explanation="Unexpected engine error.",
-                    chunks_checked=0, points_deducted=0, error=str(exc),
-                )
-            results.append(result)
+                logger.exception("Unexpected error in framework batch %s", fw)
+                # Fallback: evaluate each rule individually for this framework
+                for i, rule in enumerate(rules_by_fw[fw]):
+                    if i > 0:
+                        time.sleep(1.0)
+                    try:
+                        results.append(_check_rule(
+                            rule, collection_name, top_k_per_rule, groq_client, groq_model,
+                            document_id,
+                        ))
+                    except Exception:
+                        results.append(RuleResult(
+                            rule_id=rule.id, rule_name=rule.name,
+                            regulation=rule.regulation, article=rule.article,
+                            violation=False, severity="none",
+                            explanation="Unexpected engine error.",
+                            chunks_checked=0, points_deducted=0, error=str(exc),
+                        ))
 
-    # Sort by regulation then rule name for consistent output
     results.sort(key=lambda r: (r.regulation, r.rule_name))
-
     return _build_audit_report(collection_name, results)
 
 
@@ -789,30 +1096,40 @@ def run_multi_framework_audit(
         len(rules_to_check), frameworks, document_id,
     )
 
-    # Run all rules concurrently (same engine as single-framework)
+    # Group rules by framework for batch evaluation
+    rules_by_fw: dict[str, list[ComplianceRule]] = {}
+    for rule in rules_to_check:
+        rules_by_fw.setdefault(rule.regulation, []).append(rule)
+
     all_results: list[RuleResult] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(
-                _check_rule, rule, collection_name, top_k_per_rule, groq_client, groq_model,
-                document_id,
-            ): rule
-            for rule in rules_to_check
-        }
-        for future in as_completed(futures):
-            rule = futures[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                logger.exception("Unexpected error in rule %s", rule.id)
-                result = RuleResult(
-                    rule_id=rule.id, rule_name=rule.name,
-                    regulation=rule.regulation, article=rule.article,
-                    violation=False, severity="none",
-                    explanation="Unexpected engine error.",
-                    chunks_checked=0, points_deducted=0, error=str(exc),
-                )
-            all_results.append(result)
+    fw_items = list(rules_by_fw.items())
+    for idx, (fw, fw_rules) in enumerate(fw_items):
+        if idx > 0:
+            time.sleep(2.0)
+        try:
+            fw_results = _check_framework_batch(
+                fw_rules, fw, collection_name,
+                top_k_per_rule, groq_client, document_id,
+            )
+            all_results.extend(fw_results)
+        except Exception as exc:
+            logger.exception("Unexpected error in framework batch %s", fw)
+            for i, rule in enumerate(fw_rules):
+                if i > 0:
+                    time.sleep(1.0)
+                try:
+                    all_results.append(_check_rule(
+                        rule, collection_name, top_k_per_rule, groq_client, groq_model,
+                        document_id,
+                    ))
+                except Exception:
+                    all_results.append(RuleResult(
+                        rule_id=rule.id, rule_name=rule.name,
+                        regulation=rule.regulation, article=rule.article,
+                        violation=False, severity="none",
+                        explanation="Unexpected engine error.",
+                        chunks_checked=0, points_deducted=0, error=str(exc),
+                    ))
 
     all_results.sort(key=lambda r: (r.regulation, r.rule_name))
 

@@ -1,7 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import Sidebar from "../Sidebar";
-import { SidebarProvider, SidebarTrigger } from "../ui/sidebar";
+import Navbar from "../Navbar";
+import { PageShell } from "../shared/PageShell";
+import { SidebarProvider } from "../ui/sidebar";
+import { X } from "lucide-react";
 
 function useAuth() {
   try {
@@ -13,14 +16,25 @@ function useAuth() {
 }
 
 function DisclaimerBanner() {
+  const [dismissed, setDismissed] = useState(() => sessionStorage.getItem("disclaimer_dismissed") === "true");
+
+  if (dismissed) return null;
+
   return (
-    <div className="flex items-center gap-3 bg-amber-50 border-b border-amber-200 px-6 py-2.5 mb-3 text-xs sm:text-sm text-amber-800">
+    <div className="flex items-center gap-3 bg-amber-50 border-b border-amber-200 px-6 py-2.5 text-xs sm:text-sm text-amber-800">
       <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-amber-200 text-amber-900 font-bold text-xs" aria-hidden="true">
         !
       </span>
-      <p className="leading-snug">
+      <p className="leading-snug flex-1">
         <strong className="font-semibold">Disclaimer:</strong> ReguLens AI analysis is for informational purposes only and does not constitute legal advice. All findings should be reviewed by a qualified professional for legal decisions.
       </p>
+      <button
+        onClick={() => { setDismissed(true); sessionStorage.setItem("disclaimer_dismissed", "true"); }}
+        className="shrink-0 rounded-lg p-1 hover:bg-amber-200/50 transition-colors"
+        aria-label="Dismiss"
+      >
+        <X className="size-4" />
+      </button>
     </div>
   );
 }
@@ -62,12 +76,14 @@ export function AppLayout({ children }: AppLayoutProps) {
         <DisclaimerBanner />
         <div className="flex flex-1 overflow-hidden">
           <Sidebar />
-          <main className="relative flex-1 overflow-auto bg-background px-6">
-            <div className="sticky top-0 z-10 flex items-center bg-background/80 backdrop-blur-sm px-1 pt-1 pb-0">
-              <SidebarTrigger />
-            </div>
-            {children ?? <Outlet />}
-          </main>
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <Navbar />
+            <main className="flex-1 overflow-auto bg-background">
+              <PageShell>
+                {children ?? <Outlet />}
+              </PageShell>
+            </main>
+          </div>
         </div>
       </div>
     </SidebarProvider>

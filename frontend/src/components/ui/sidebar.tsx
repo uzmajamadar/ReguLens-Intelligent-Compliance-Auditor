@@ -25,20 +25,3 @@ export function useSidebar() {
   if (!ctx) throw new Error("useSidebar must be used within <SidebarProvider>")
   return ctx
 }
-
-export function SidebarTrigger({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  const { toggleSidebar } = useSidebar()
-  return (
-    <button
-      onClick={toggleSidebar}
-      className={cn(
-        "inline-flex items-center justify-center rounded-lg p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors",
-        className
-      )}
-      {...props}
-    >
-      <PanelLeft className="size-4" />
-      <span className="sr-only">Toggle sidebar</span>
-    </button>
-  )
-}

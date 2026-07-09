@@ -7,10 +7,11 @@ const AVAILABLE_FRAMEWORKS = [
   "GDPR",
   "HIPAA",
   "SOC2",
+  "PCI-DSS",
   "ISO27001",
-  "PCI DSS",
-  "Employment Law",
-  "CCPA",
+  "HR",
+  "Guardrails & Safety",
+  "Document Lifecycle & Grounding",
 ];
 
 export default function UploadDialog({ open, onOpenChange, onSuccess }) {
@@ -21,6 +22,7 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
   const [error, setError] = useState(null);
   const [frameworks, setFrameworks] = useState([]);
   const inputRef = useRef(null);
+  const submittingRef = useRef(false);
 
   function handleDrop(e) {
     e.preventDefault();
@@ -55,7 +57,8 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
   }
 
   async function handleUpload() {
-    if (!file) return;
+    if (!file || submittingRef.current) return;
+    submittingRef.current = true;
     setUploading(true);
     setProgress(0);
     setError(null);
@@ -64,15 +67,17 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
     try {
       const data = await uploadDocument(file, setProgress, frameworks);
       setResult(data);
+
       setTimeout(() => {
         onOpenChange(false);
         onSuccess?.(data);
         reset();
-      }, 2000);
+      }, 1500);
     } catch (err) {
       setError(err.message);
     } finally {
       setUploading(false);
+      submittingRef.current = false;
     }
   }
 
@@ -174,7 +179,7 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
                 </div>
               )}
 
-              {/* Progress */}
+              {/* Progress — only during upload, hidden during scan phases */}
               {uploading && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -190,18 +195,13 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
                 </div>
               )}
 
-              {/* Success */}
+              {/* Upload success */}
               {result && (
                 <div className="flex items-start gap-2 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800">
                   <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-green-600" />
                   <div>
                     <p className="font-medium">Upload successful!</p>
                     <p className="mt-0.5 text-green-700">{result.message}</p>
-                    {frameworks.length > 0 && (
-                      <p className="mt-0.5 text-green-700">
-                        Will scan against: {frameworks.join(", ")}
-                      </p>
-                    )}
                   </div>
                 </div>
               )}
@@ -218,10 +218,11 @@ export default function UploadDialog({ open, onOpenChange, onSuccess }) {
               {!uploading && !result && (
                 <button
                   onClick={handleUpload}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                  disabled={submittingRef.current}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Upload className="size-4" />
-                  Upload{frameworks.length > 0 ? " & Scan" : ""}
+                  Upload
                 </button>
               )}
             </div>

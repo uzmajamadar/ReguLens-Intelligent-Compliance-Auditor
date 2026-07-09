@@ -24,7 +24,7 @@ def check_overdue(
         .join(Document, ReviewTask.document_id == Document.id)
         .filter(
             ReviewTask.due_date < now,
-            ReviewTask.status == "pending_review",
+            ReviewTask.status.in_(["pending", "assigned"]),
             ReviewTask.assigned_to.isnot(None),
             Document.organization_id == current_user.organization_id,
         )
