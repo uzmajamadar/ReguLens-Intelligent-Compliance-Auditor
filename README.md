@@ -16,7 +16,6 @@ Manual compliance review is slow, expensive, and error-prone. ReguLens brings AI
 - **Multi-Framework** — GDPR, HIPAA, SOC 2, PCI DSS, ISO 27001, CCPA
 - **AI-Powered** — rule evaluation via Groq LLM with semantic vector search
 - **Human-in-the-Loop** — review queue with task assignment and audit trail
-- **Ready to Deploy** — Docker Compose with PostgreSQL + Qdrant
 
 ---
 
@@ -60,7 +59,6 @@ Manual compliance review is slow, expensive, and error-prone. ReguLens brings AI
 | **OCR** | Tesseract via PyMuPDF |
 | **File Storage** | Local filesystem or S3-compatible |
 | **Notifications** | SMTP email, Slack webhooks |
-| **Deployment** | Docker Compose, Netlify |
 
 ---
 
@@ -98,7 +96,6 @@ React SPA ──HTTP /api/*──► FastAPI Server
 ### Prerequisites
 - Python 3.11+
 - Node.js 20+
-- Docker & Docker Compose (optional)
 - Tesseract OCR
 - Groq API key ([free tier](https://console.groq.com))
 
@@ -126,11 +123,6 @@ npm install
 npm run dev
 ```
 
-### Docker (Full Stack)
-
-```bash
-docker compose up --build
-```
 
 ### Access
 
@@ -162,7 +154,6 @@ docker compose up --build
 | `SMTP_HOST` | SMTP server | No |
 | `SMTP_USER` / `SMTP_PASS` | SMTP credentials | No |
 | `SLACK_WEBHOOK_URL` | Default Slack webhook | No |
-| `S3_BUCKET` | S3 bucket for files | No |
 
 ---
 
@@ -215,7 +206,6 @@ Interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc).
 - SSO/SAML integration
 - Bulk document upload
 - Scheduled recurring scans
-- Kubernetes/Helm deployment charts
 - CI/CD pipeline with GitHub Actions
 - Internationalization (i18n)
 
@@ -239,12 +229,3 @@ MIT — see `LICENSE` for details.
 ## Author
 
 **Uzma Jamadar**
-
-- GitHub: [@uzmajamadar](https://github.com/uzmajamadar)
-- LinkedIn: [uzmajamadar](https://linkedin.com/in/uzmajamadar)
-
----
-
-## Acknowledgements
-
-[FastAPI](https://fastapi.tiangolo.com/) · [React](https://react.dev/) · [Tailwind CSS](https://tailwindcss.com/) · [Radix UI](https://www.radix-ui.com/) · [TanStack Query](https://tanstack.com/query) · [Qdrant](https://qdrant.tech/) · [Groq](https://groq.com/) · [HuggingFace](https://huggingface.co/) · [LlamaIndex](https://www.llamaindex.ai/) · [PyMuPDF](https://pymupdf.readthedocs.io/) · [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) · [SQLAlchemy](https://www.sqlalchemy.org/) · [Alembic](https://alembic.sqlalchemy.org/) · [Lucide Icons](https://lucide.dev/)
