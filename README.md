@@ -6,7 +6,7 @@
 
 ## Overview
 
-**ReguLens AI** automates compliance document review against major regulatory frameworks. Upload policies, detect violations, assign review tasks, and track remediation — all in one place.
+**ReguLens AI** automates compliance document review against major regulatory frameworks. Upload policies, detect violations, assign review tasks, and track remediation — all in one unified platform.
 
 ## Why ReguLens?
 
