@@ -51,6 +51,19 @@ def _find_user_by_role(db: Session, role: str, organization_id: int) -> User | N
                 next_user = users[next_idx]
                 tracker.last_user_id = next_user.id
                 tracker.updated_at = datetime.now(timezone.utc)
+                return next_user
+
+    # First assignment or tracker not found — pick first user and save
+    next_user = users[0]
+    if tracker:
+        tracker.last_user_id = next_user.id
+        tracker.updated_at = datetime.now(timezone.utc)
+    else:
+        db.add(RoleAssignmentTracker(
+            organization_id=organization_id,
+            role=role,
+            last_user_id=next_user.id,
+        ))
     return next_user
 
 
@@ -78,19 +91,6 @@ def _notify_admins_orphan_task(db: Session, organization_id: int, step: Workflow
         "Notified %d admin(s) about orphan task %d (role='%s')",
         len(admins), task_id, step.assigned_role,
     )
-
-    # First assignment or tracker not found — pick first user and save
-    next_user = users[0]
-    if tracker:
-        tracker.last_user_id = next_user.id
-        tracker.updated_at = datetime.now(timezone.utc)
-    else:
-        db.add(RoleAssignmentTracker(
-            organization_id=organization_id,
-            role=role,
-            last_user_id=next_user.id,
-        ))
-    return next_user
 
 
 def _create_notification(db: Session, user_id: int, title: str, message: str | None = None,
@@ -314,6 +314,7 @@ def complete_task(
 
 def advance_workflow(db: Session, instance: WorkflowInstance, from_task: WorkflowTask | None = None):
     """Advance the workflow by finding the next valid step through transitions."""
+    visited_steps = set()
     current_step = db.query(WorkflowStep).filter(WorkflowStep.id == instance.current_step_id).first()
     if not current_step:
         instance.status = "completed"
@@ -359,6 +360,16 @@ def advance_workflow(db: Session, instance: WorkflowInstance, from_task: Workflo
     db.flush()
 
     if next_step.step_type == "system":
+        if next_step.id in visited_steps:
+            logger.warning(
+                "Workflow instance %d: infinite loop detected at step '%s' (id=%d) — marking as completed",
+                instance.id, next_step.name, next_step.id,
+            )
+            instance.status = "completed"
+            instance.completed_at = datetime.now(timezone.utc)
+            db.flush()
+            return
+        visited_steps.add(next_step.id)
         advance_workflow(db, instance, None)
         return
 

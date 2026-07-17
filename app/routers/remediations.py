@@ -252,7 +252,6 @@ Return ONLY valid JSON with no markdown formatting or extra text."""
     db.flush()
 
     from app.notifications import notify_remediation_created
-    from app.models import Scan, Document
     scan_obj = db.query(Scan).filter(Scan.id == violation.scan_id).first()
     if scan_obj:
         doc_obj = db.query(Document).filter(Document.id == scan_obj.document_id).first()
@@ -368,6 +367,7 @@ def apply_remediation(
 
     doc.version_number = (doc.version_number or 1) + 1
     doc.full_text = new_text
+    doc.status = "ready"
 
     version = DocumentVersion(
         document_id=doc.id,
@@ -389,7 +389,7 @@ def apply_remediation(
         id=s.id,
         status=s.status,
         version=doc.version_number,
-        message=f"Applied Successfully\nDocument Version: v{doc.version_number}\nChanges:\n+ Added compliant clause for '{violation.rule_id}'",
+        message=f"Applied Successfully\nDocument Version: v{doc.version_number}\nChanges:\n+ Added compliant clause for '{violation.rule_id}'\n⚠ Re-scan required for vector search to reflect changes.",
     )
 
 

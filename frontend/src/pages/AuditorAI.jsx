@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import {
+import {// eslint-disable-next-line no-unused-vars
   Plus, Send, Loader2, MessageSquare, Trash2, Copy, RefreshCw,
   Download, FileText, X, PanelRightOpen, PanelRightClose,
   PanelLeftOpen, PanelLeftClose, Sparkles, CheckCircle2,
@@ -152,7 +152,7 @@ function AIResponseCard({ message, onAction }) {
             <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">Regulation References</p>
             <div className="space-y-1.5">
               {message.references.map((ref, i) => (
-                <RegulationCitation key={i} ref={ref} />
+                <RegulationCitation key={i} cite={ref} />
               ))}
             </div>
           </div>
@@ -490,6 +490,7 @@ export default function ComplianceCopilot() {
   const [activeConversationId, setActiveConversationId] = useState(null);
   const [messageText, setMessageText] = useState("");
   const [streamingContent, setStreamingContent] = useState(null);
+  const [streamError, setStreamError] = useState(null);
   const [sending, setSending] = useState(false);
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -497,6 +498,8 @@ export default function ComplianceCopilot() {
 
   const messagesEndRef = useRef(null);
   const msgIdCounter = useRef(0);
+  const activeConvIdRef = useRef(null);
+  const messageTextRef = useRef("");
 
   const selectedDocNumericId = useMemo(() => {
     if (!hasPreselectedDoc) return null;
@@ -527,6 +530,14 @@ export default function ComplianceCopilot() {
 
   const createConversation = useCreateGroqConversation();
   const deleteConversation = useDeleteGroqConversation();
+
+  useEffect(() => {
+    activeConvIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    messageTextRef.current = messageText;
+  }, [messageText]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -565,38 +576,19 @@ export default function ComplianceCopilot() {
   };
 
   const handleSend = async () => {
-    if (!messageText.trim() || !activeConversationId || sending) return;
+    const content = messageTextRef.current.trim();
+    const convId = activeConvIdRef.current;
+    if (!content || !convId || sending) return;
 
-    const content = messageText.trim();
     setMessageText("");
     setSending(true);
     setStreamingContent("");
-
-    const persistMessages = (msgs) => {
-      const key = "groq_messages";
-      const all = JSON.parse(localStorage.getItem(key) || "{}");
-      all[activeConversationId] = msgs;
-      localStorage.setItem(key, JSON.stringify(all));
-    };
-
-    const getMessages = () => {
-      const key = "groq_messages";
-      return JSON.parse(localStorage.getItem(key) || "{}")[activeConversationId] || [];
-    };
+    setStreamError(null);
 
     try {
-      const timestamp = Date.now();
-      const newUserMsg = {
-        id: `${timestamp}-${msgIdCounter.current++}`,
-        role: "user",
-        content,
-        createdAt: new Date(timestamp).toISOString(),
-      };
-      const existing = getMessages();
-      persistMessages([...existing, newUserMsg]);
       const docId = effectiveDocumentId !== "none" ? Number(effectiveDocumentId) : undefined;
       const token = sessionStorage.getItem("regulens_token");
-      const response = await fetch(`/api/groq/conversations/${activeConversationId}/messages`, {
+      const response = await fetch(`/api/groq/conversations/${convId}/messages`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -621,7 +613,10 @@ export default function ComplianceCopilot() {
             try {
               const data = JSON.parse(line.slice(6));
               if (data.done) break;
-              if (data.error) break;
+              if (data.error) {
+                setStreamError(data.error);
+                break;
+              }
               if (data.content) {
                 fullText += data.content;
                 setStreamingContent(fullText);
@@ -634,17 +629,11 @@ export default function ComplianceCopilot() {
       }
 
       setStreamingContent(null);
-      const newAssistantMsg = {
-        id: `${Date.now()}-${msgIdCounter.current++}`,
-        role: "assistant",
-        content: fullText,
-        createdAt: new Date().toISOString(),
-      };
-      persistMessages([...getMessages(), newAssistantMsg]);
       queryClient.invalidateQueries({
-        queryKey: getListGroqMessagesQueryKey(activeConversationId),
+        queryKey: getListGroqMessagesQueryKey(convId),
       });
-    } catch {
+    } catch (err) {
+      setStreamError(err.message || "Failed to send message");
       setStreamingContent(null);
     } finally {
       setSending(false);
@@ -786,6 +775,19 @@ export default function ComplianceCopilot() {
 
                   {streamingContent !== null && (
                     <MarkdownCard content={streamingContent} streaming />
+                  )}
+
+                  {streamError && (
+                    <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 flex items-start gap-3">
+                      <AlertTriangle className="size-4 text-destructive shrink-0 mt-0.5" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-destructive">AI response failed</p>
+                        <p className="text-xs text-destructive/70 mt-0.5 break-words">{streamError}</p>
+                      </div>
+                      <button onClick={() => setStreamError(null)} className="text-destructive/50 hover:text-destructive transition-colors shrink-0">
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
                   )}
 
                   <div ref={messagesEndRef} />

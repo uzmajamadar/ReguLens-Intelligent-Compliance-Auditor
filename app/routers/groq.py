@@ -18,18 +18,114 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 
+# ── Schemas ──────────────────────────────────────────────────────────────
+
+class CreateConversationRequest(BaseModel):
+    title: str = "Compliance Chat"
+    document_id: int | None = None
+
+
 class ChatMessageRequest(BaseModel):
     content: str
     document_id: int | None = None
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+def _serialize_conversation(conv: Conversation) -> dict:
+    return {
+        "id": conv.id,
+        "title": conv.title,
+        "documentId": conv.document_id,
+        "createdAt": conv.created_at.isoformat() if conv.created_at else None,
+    }
+
+
+def _serialize_message(msg: Message) -> dict:
+    return {
+        "id": msg.id,
+        "role": msg.role,
+        "content": msg.content,
+        "createdAt": msg.created_at.isoformat() if msg.created_at else None,
+    }
+
+
 def _fallback_response(question: str):
     return (
-        "I’m ready to help with compliance questions. "
+        "I'm ready to help with compliance questions. "
         f"You asked: {question[:180]}"
         " If you add a valid Groq API key, I can generate richer answers."
     )
 
+
+# ── Conversation CRUD ───────────────────────────────────────────────────
+
+@router.get("/conversations")
+def list_conversations(
+    document_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    q = db.query(Conversation).filter(Conversation.user_id == current_user.id)
+    if document_id is not None:
+        q = q.filter(Conversation.document_id == document_id)
+    convs = q.order_by(Conversation.created_at.desc()).all()
+    return [_serialize_conversation(c) for c in convs]
+
+
+@router.post("/conversations", status_code=201)
+def create_conversation(
+    payload: CreateConversationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    conv = Conversation(
+        title=payload.title,
+        user_id=current_user.id,
+        document_id=payload.document_id,
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return _serialize_conversation(conv)
+
+
+@router.delete("/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    conv = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user.id,
+    ).first()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    db.delete(conv)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/conversations/{conversation_id}/messages")
+def list_messages(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    conv = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user.id,
+    ).first()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msgs = db.query(Message).filter(
+        Message.conversation_id == conversation_id
+    ).order_by(Message.created_at).all()
+    return [_serialize_message(m) for m in msgs]
+
+
+# ── Send message (streaming) ────────────────────────────────────────────
 
 @router.post("/conversations/{conversation_id}/messages")
 def send_message(
@@ -38,17 +134,23 @@ def send_message(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conversation = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    conversation = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user.id,
+    ).first()
     if conversation is None:
-        conversation = Conversation(id=conversation_id, title="Compliance Chat", user_id=current_user.id)
-        if payload.document_id:
-            conversation.document_id = payload.document_id
+        conversation = Conversation(
+            title="Compliance Chat",
+            user_id=current_user.id,
+            document_id=payload.document_id,
+        )
         db.add(conversation)
         db.flush()
     elif payload.document_id and conversation.document_id is None:
         conversation.document_id = payload.document_id
 
     db.add(Message(conversation_id=conversation.id, role="user", content=payload.content))
+    db.commit()
 
     doc_text = ""
     doc_id = payload.document_id or conversation.document_id
@@ -72,48 +174,47 @@ def send_message(
                     chunk = text[i : i + 24]
                     yield f"data: {json.dumps({'content': chunk})}\n\n"
                     await asyncio.sleep(0.02)
-                yield "data: {\"done\": true}\n\n"
-                return
+                full_text = text
+            else:
+                system_prompt = (
+                    "You are ReguLens AI, a compliance assistant. "
+                    "Answer concisely, helpfully, and grounded in the provided document. "
+                    "Do NOT use markdown formatting like ** or * for emphasis. "
+                    "Use plain text only. "
+                    "If the document text does NOT contain explicit page markers "
+                    "(e.g. '--- Page 1 ---'), do NOT mention any page numbers. "
+                    "Never invent or guess page numbers."
+                )
+                if doc_text:
+                    system_prompt += (
+                        f"\n\nHere is the document the user is asking about:\n\n{doc_text}"
+                    )
 
-            system_prompt = (
-                "You are ReguLens AI, a compliance assistant. "
-                "Answer concisely, helpfully, and grounded in the provided document. "
-                "Do NOT use markdown formatting like ** or * for emphasis. "
-                "Use plain text only. "
-                "If the document text does NOT contain explicit page markers "
-                "(e.g. '--- Page 1 ---'), do NOT mention any page numbers. "
-                "Never invent or guess page numbers."
-            )
-            if doc_text:
-                system_prompt += (
-                    f"\n\nHere is the document the user is asking about:\n\n{doc_text}"
+                history = (
+                    db.query(Message)
+                    .filter(Message.conversation_id == conversation.id)
+                    .order_by(Message.created_at)
+                    .all()
                 )
 
-            history = (
-                db.query(Message)
-                .filter(Message.conversation_id == conversation.id)
-                .order_by(Message.created_at)
-                .all()
-            )
+                groq_messages = [{"role": "system", "content": system_prompt}]
+                for msg in history:
+                    groq_messages.append({"role": msg.role, "content": msg.content})
 
-            groq_messages = [{"role": "system", "content": system_prompt}]
-            for msg in history:
-                groq_messages.append({"role": msg.role, "content": msg.content})
+                client = Groq(api_key=GROQ_API_KEY)
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=groq_messages,
+                    stream=True,
+                )
 
-            client = Groq(api_key=GROQ_API_KEY)
-            completion = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=groq_messages,
-                stream=True,
-            )
-
-            full_text = ""
-            for chunk in completion:
-                delta = getattr(chunk.choices[0], "delta", None)
-                text = getattr(delta, "content", None) or ""
-                if text:
-                    full_text += text
-                    yield f"data: {json.dumps({'content': text})}\n\n"
+                full_text = ""
+                for chunk in completion:
+                    delta = getattr(chunk.choices[0], "delta", None)
+                    text = getattr(delta, "content", None) or ""
+                    if text:
+                        full_text += text
+                        yield f"data: {json.dumps({'content': text})}\n\n"
 
             db.add(Message(conversation_id=conversation.id, role="assistant", content=full_text))
             db.commit()

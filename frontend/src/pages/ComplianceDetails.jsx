@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import {
   listDocuments, listScans, getComplianceRules, listAllViolations,
-  patchViolation, submitForReview,
+  rejectReviewTask, submitForReview,
 } from "../lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -253,12 +253,19 @@ export default function ComplianceDetails() {
     const items = [];
 
     scans.filter((s) => s.status === "completed").forEach((s) => {
+      const scanType = s.scan_type === "selective" ? " (Selective)" : "";
+      const rulesInfo = s.rules_evaluated != null
+        ? ` | ${s.rules_evaluated} rules evaluated`
+        : "";
+      const changedInfo = s.changed_percentage != null && s.changed_percentage > 0
+        ? ` | ${Math.round(s.changed_percentage)}% changed`
+        : "";
       items.push({
         id: `scan-${s.id}`,
         type: "scan",
         timestamp: s.created_at,
-        label: s.framework ? `Scan completed for ${s.framework}` : "Scan completed",
-        detail: s.score != null ? `Score: ${s.score}/100` : null,
+        label: `${s.framework ? `Scan completed for ${s.framework}` : "Scan completed"}${scanType}`,
+        detail: `${s.score != null ? `Score: ${s.score}/100` : ""}${rulesInfo}${changedInfo}`,
       });
     });
 
@@ -329,8 +336,13 @@ export default function ComplianceDetails() {
   async function handleAssign(v) {
     if (!assignName.trim()) return;
     try {
-      await patchViolation(v.id, { assigned_to: assignName.trim() });
-      setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, assigned_to: assignName.trim(), status: "assigned" } : x));
+      if (v.review_task_id) {
+        await submitForReview(v.id);
+        setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, status: "pending" } : x));
+      } else {
+        await submitForReview(v.id);
+        setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, status: "pending" } : x));
+      }
       setAssigningId(null);
       setAssignName("");
     } catch (err) {
@@ -340,8 +352,13 @@ export default function ComplianceDetails() {
 
   async function handleDismiss(v) {
     try {
-      await patchViolation(v.id, { status: "dismissed" });
-      setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, status: "dismissed" } : x));
+      if (v.review_task_id) {
+        await rejectReviewTask(v.review_task_id, "Dismissed from compliance investigation");
+        setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, status: "dismissed" } : x));
+      } else {
+        await submitForReview(v.id);
+        setViolations((prev) => prev.map((x) => x.id === v.id ? { ...x, status: "pending" } : x));
+      }
     } catch (err) {
       console.error("Failed to dismiss", err);
     }

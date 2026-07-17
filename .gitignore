@@ -1,3 +1,7 @@
+# Markdown files (except README.md)
+*.md
+!README.md
+
 # Python
 __pycache__/
 *.py[cod]
@@ -42,3 +46,15 @@ uploads/
 
 # opencode
 .opencode/
+
+# Test artifacts
+.pytest_cache/
+test_minimal.pdf
+test_upload.py
+
+# Tokens and secrets
+token.txt
+
+# Database files
+autodoc.db
+regulens.db

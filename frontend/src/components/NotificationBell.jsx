@@ -1,15 +1,31 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, ClipboardList, ExternalLink } from "lucide-react";
+import { Bell, ClipboardList, CheckCircle2, AlertTriangle, ExternalLink, Upload } from "lucide-react";
 import { listNotifications, markNotificationRead, markAllNotificationsRead } from "../lib/api";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
 const TYPE_ICONS = {
   review_assigned: ClipboardList,
+  review_approved: CheckCircle2,
+  review_rejected: AlertTriangle,
+  review_changes_requested: AlertTriangle,
+  review_resolved: CheckCircle2,
+  task_assigned: ClipboardList,
+  task_orphaned: AlertTriangle,
+  upload_complete: Upload,
+  info: Bell,
 };
 
 const TYPE_COLORS = {
   review_assigned: "text-blue-600 bg-blue-50",
+  review_approved: "text-green-600 bg-green-50",
+  review_rejected: "text-red-600 bg-red-50",
+  review_changes_requested: "text-amber-600 bg-amber-50",
+  review_resolved: "text-green-600 bg-green-50",
+  task_assigned: "text-blue-600 bg-blue-50",
+  task_orphaned: "text-amber-600 bg-amber-50",
+  upload_complete: "text-purple-600 bg-purple-50",
+  info: "text-gray-600 bg-gray-50",
 };
 
 function parseMessage(msg) {
@@ -119,7 +135,7 @@ export default function NotificationBell() {
                       </p>
                     </div>
                   </div>
-                  {n.type === "review_assigned" && (
+                  {n.type.startsWith("review_") && (
                     <div className="mt-2 flex justify-end">
                       <button
                         onClick={() => handleOpenReview(n.id)}

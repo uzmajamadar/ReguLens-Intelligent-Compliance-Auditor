@@ -2,7 +2,7 @@
 models.py — SQLAlchemy ORM models for documents, versions, and feedback.
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -176,6 +176,14 @@ class Scan(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
+    # Scan metadata (selective revalidation)
+    scan_type = Column(String(20), default="full")         # "full" | "selective" | "incremental"
+    rules_evaluated = Column(Integer, nullable=True)        # how many rules were actually run via LLM
+    rules_skipped = Column(Integer, nullable=True)          # rules carried forward from prior scan
+    chunks_diffed = Column(Integer, nullable=True)          # number of chunks compared in diff
+    changed_chunks = Column(Integer, nullable=True)         # number of chunks that changed
+    changed_percentage = Column(Float, nullable=True)       # percentage of document changed
+
     document = relationship("Document", back_populates="scans")
     violations = relationship("Violation", back_populates="scan", cascade="all, delete-orphan")
     evaluations = relationship("RuleEvaluation", back_populates="scan", cascade="all, delete-orphan")
@@ -211,7 +219,14 @@ class Violation(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Cross-version tracking (selective revalidation)
+    document_version = Column(Integer, nullable=True)       # version_number when this violation was found
+    section_path = Column(String(512), nullable=True)       # semantic location e.g. "Privacy > Cookies > Third Party"
+    chunk_hash = Column(String(64), nullable=True)          # SHA-256 of primary source chunk text
+    previous_violation_id = Column(Integer, ForeignKey("violations.id", ondelete="SET NULL"), nullable=True)
+
     scan = relationship("Scan", back_populates="violations")
+    previous_violation = relationship("Violation", remote_side="Violation.id", foreign_keys=[previous_violation_id])
 
     def __repr__(self) -> str:
         return f"<Violation id={self.id} scan={self.scan_id} rule={self.rule_id}>"
@@ -268,6 +283,9 @@ class ReviewTask(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     reviewed_at = Column(DateTime, nullable=True)
 
+    # Cross-version linking
+    violation_link_id = Column(Integer, ForeignKey("violations.id", ondelete="SET NULL"), nullable=True)
+
     scan = relationship("Scan", back_populates="review_tasks")
     document = relationship("Document")
 
@@ -316,6 +334,75 @@ class RemediationSuggestion(Base):
 
     def __repr__(self) -> str:
         return f"<RemediationSuggestion id={self.id} violation={self.violation_id} status={self.status}>"
+
+
+class DocumentChunk(Base):
+    """Content-addressed chunk storage for cross-version diff and selective revalidation."""
+    __tablename__ = "document_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    page_numbers = Column(Text, nullable=True)        # JSON array e.g. "[7, 8]"
+    section_heading = Column(String(255), nullable=True)  # nearest heading above this chunk
+    section_path = Column(String(512), nullable=True)     # hierarchical path e.g. "Privacy > Cookies"
+    content_hash = Column(String(64), nullable=False, index=True)  # SHA-256 of chunk text
+    embedding_stored = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    document = relationship("Document")
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_number", "chunk_index", name="uq_chunk_doc_ver_idx"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentChunk id={self.id} doc={self.document_id} v{self.version_number} idx={self.chunk_index}>"
+
+
+class ChunkDiff(Base):
+    """Cross-version chunk comparison results for selective revalidation."""
+    __tablename__ = "chunk_diffs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    old_document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    new_document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    old_chunk_id = Column(Integer, ForeignKey("document_chunks.id", ondelete="SET NULL"), nullable=True)
+    new_chunk_id = Column(Integer, ForeignKey("document_chunks.id", ondelete="SET NULL"), nullable=True)
+    similarity_score = Column(Float, nullable=True)     # cosine similarity of embeddings
+    change_type = Column(String(20), nullable=False)     # "added" | "removed" | "modified" | "unchanged"
+    old_page_number = Column(Integer, nullable=True)
+    new_page_number = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    old_document = relationship("Document", foreign_keys=[old_document_id])
+    new_document = relationship("Document", foreign_keys=[new_document_id])
+
+    def __repr__(self) -> str:
+        return f"<ChunkDiff id={self.id} type={self.change_type} sim={self.similarity_score}>"
+
+
+class RuleChunkMapping(Base):
+    """Rule-to-chunk affinity matrix from scan results — tracks which chunks each rule evaluated."""
+    __tablename__ = "rule_chunk_mapping"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(String(100), nullable=False, index=True)
+    framework = Column(String(50), nullable=False)
+    chunk_id = Column(Integer, ForeignKey("document_chunks.id", ondelete="SET NULL"), nullable=True)
+    chunk_hash = Column(String(64), nullable=True)       # denormalized for fast lookup
+    relevance_score = Column(Float, nullable=True)       # from Qdrant similarity search
+    scan_id = Column(Integer, ForeignKey("scans.id", ondelete="SET NULL"), nullable=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    chunk = relationship("DocumentChunk")
+    scan = relationship("Scan")
+
+    def __repr__(self) -> str:
+        return f"<RuleChunkMapping rule={self.rule_id} chunk={self.chunk_id} score={self.relevance_score}>"
 
 
 class Conversation(Base):

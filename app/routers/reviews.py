@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import Permission, get_current_user, log_audit, require_permission
 from app.database import get_db
-from app.models import AuditLog, Document, RemediationSuggestion, ReviewTask, ReviewTaskEvent, Scan, User, Violation
+from app.models import AuditLog, Document, RemediationSuggestion, ReviewTask, ReviewTaskEvent, RuleEvaluation, Scan, User, Violation
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,8 @@ def approve_review_task(
         raise HTTPException(status_code=400, detail="Task must be in review before approval")
     if task.submitted_by_id and task.submitted_by_id == current_user.id:
         raise HTTPException(status_code=403, detail="Cannot approve your own review task")
+    if task.assigned_to_id and task.assigned_to_id == current_user.id and task.submitted_by_id is None:
+        raise HTTPException(status_code=403, detail="Cannot approve a task you self-assigned")
     old_status = task.status
     task.status = "approved"
     task.reviewed_at = datetime.now(timezone.utc)
@@ -328,6 +330,8 @@ def resolve_review_task(
         raise HTTPException(status_code=400, detail="Task must be approved before final resolution")
     if task.submitted_by_id and task.submitted_by_id == current_user.id:
         raise HTTPException(status_code=403, detail="Cannot resolve your own review task")
+    if task.assigned_to_id and task.assigned_to_id == current_user.id and (not task.submitted_by_id or task.submitted_by_id == current_user.id):
+        raise HTTPException(status_code=403, detail="Cannot resolve a task you self-assigned")
 
     old_status = task.status
     task.status = "resolved"
@@ -400,6 +404,8 @@ def needs_fix_review_task(
     task = _get_org_review_task(db, task_id, current_user.organization_id)
     if task.status in ("resolved", "dismissed"):
         raise HTTPException(status_code=400, detail="Cannot modify a finalized review task")
+    if task.status not in ("in_review", "assigned"):
+        raise HTTPException(status_code=400, detail="Task must be in review before requesting changes")
     if task.submitted_by_id and task.submitted_by_id == current_user.id:
         raise HTTPException(status_code=403, detail="Cannot request changes on your own review task")
     old_status = task.status
@@ -439,6 +445,20 @@ def resubmit_review_task(
     from app.notifications import notify_auto_resubmitted
     reviewer = db.query(User).filter(User.id == task.assigned_to_id).first() if task.assigned_to_id else None
     notify_auto_resubmitted(db, task, reviewer)
+
+    # Notify compliance managers
+    doc = db.query(Document).filter(Document.id == task.document_id).first()
+    org_id = doc.organization_id if doc else None
+    if org_id:
+        from app.notifications import _compliance_managers, _in_app_notification
+        owner = db.query(User).filter(User.id == doc.user_id).first() if doc.user_id else None
+        for cm in _compliance_managers(db, org_id):
+            if cm.id != (owner.id if owner else -1) and cm.id != current_user.id:
+                _in_app_notification(db, cm.id,
+                    f"Task Resubmitted: {task.rule_name}",
+                    f"Review task for '{task.rule_name}' has been resubmitted by {current_user.name}.",
+                    "review_resubmitted", task.id)
+
     return ReviewActionResponse(id=task.id, status=task.status, message="Task resubmitted for review.")
 
 

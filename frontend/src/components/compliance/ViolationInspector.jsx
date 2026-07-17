@@ -62,6 +62,22 @@ export default function ViolationInspector({
         {/* Title */}
         <p className="text-sm font-semibold text-foreground leading-snug">{violation.title}</p>
 
+        {/* Section Path */}
+        {violation.section_path && (
+          <div>
+            <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider mb-1">Location</p>
+            <p className="text-xs text-foreground/70 font-mono">{violation.section_path}</p>
+          </div>
+        )}
+
+        {/* Linked Violation */}
+        {violation.previous_violation_id && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="inline-block size-1.5 rounded-full bg-info" />
+            <span>Linked to violation from previous version</span>
+          </div>
+        )}
+
         {/* Status */}
         <div>
           <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider mb-1">Status</p>

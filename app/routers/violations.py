@@ -34,6 +34,10 @@ class ComplianceViolationSchema(BaseModel):
     status: str = "open"
     assigned_to: str | None = None
     created_at: str
+    document_version: int | None = None
+    section_path: str | None = None
+    previous_violation_id: int | None = None
+    review_task_id: int | None = None
 
 
 class ViolationPatchUpdate(BaseModel):
@@ -95,6 +99,7 @@ def list_all_violations(
     } if doc_ids else {}
 
     review_status_map = {}
+    review_task_id_map = {}
     if violations:
         review_tasks = (
             db.query(ReviewTask)
@@ -106,6 +111,7 @@ def list_all_violations(
             existing = review_status_map.get(key)
             if existing is None or (rt.created_at and existing[1] and rt.created_at > existing[1]):
                 review_status_map[key] = (rt.status, rt.created_at)
+                review_task_id_map[key] = rt.id
 
     return [
         ComplianceViolationSchema(
@@ -125,6 +131,10 @@ def list_all_violations(
             status=(review_status_map.get((v.scan_id, v.rule_id)) or (v.status,))[0],
             assigned_to=v.assigned_to,
             created_at=v.created_at.isoformat() if v.created_at else "",
+            document_version=v.document_version,
+            section_path=v.section_path,
+            previous_violation_id=v.previous_violation_id,
+            review_task_id=review_task_id_map.get((v.scan_id, v.rule_id)),
         )
         for v in violations
     ]

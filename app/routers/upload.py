@@ -14,7 +14,7 @@ from app.database import get_db
 from app.embeddings import embed_texts
 from app.file_storage import delete as delete_file, read_bytes as read_file, save as save_file
 from app.ingestion import process_pdf
-from app.models import Document, DocumentVersion, User
+from app.models import Document, DocumentVersion, DocumentChunk, User
 from app.vector_store import ensure_collection, upsert_chunks
 
 logger = logging.getLogger(__name__)
@@ -195,6 +195,28 @@ async def upload_pdf(
         doc.status = "indexed"
         logger.info("Document %d indexed into Qdrant collection '%s'.", doc.id, doc.collection_name)
 
+        # ── Persist chunks to document_chunks for cross-version diffing ──
+        if result.chunk_metadata:
+            import json as _json
+            for cm in result.chunk_metadata:
+                chunk_row = DocumentChunk(
+                    document_id=doc.id,
+                    version_number=version_number,
+                    chunk_index=cm.chunk_index,
+                    text=cm.text,
+                    page_numbers=_json.dumps(cm.page_numbers),
+                    section_heading=cm.section_heading,
+                    section_path=cm.section_path,
+                    content_hash=cm.content_hash,
+                    embedding_stored=True,
+                )
+                db.add(chunk_row)
+            db.flush()
+            logger.info(
+                "Document %d: persisted %d chunks with metadata to document_chunks.",
+                doc.id, len(result.chunk_metadata),
+            )
+
         # ── Auto-trigger scan for each framework assigned to the document ──
         fw_list = json.loads(doc.frameworks) if doc.frameworks else []
         if fw_list:
@@ -210,7 +232,13 @@ async def upload_pdf(
 
     except Exception as exc:
         logger.exception("Qdrant upsert failed for document %d", doc.id)
-        db.rollback()
+        doc.status = "failed"
+        doc.error_message = f"Vector indexing failed: {exc}"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PDF extracted successfully but vector indexing failed. Please retry the upload.",
+        ) from exc
 
     # ── Step 3 (or 4): Create immutable version snapshot ──────────────────────
     version = DocumentVersion(

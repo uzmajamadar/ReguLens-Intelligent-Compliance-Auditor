@@ -225,7 +225,7 @@ export default function ReviewQueue() {
       setSelectedDueDate((prev) => { const r = { ...prev }; delete r[task.id]; return r; });
       setAssignNote((prev) => { const r = { ...prev }; delete r[task.id]; return r; });
       await loadData();
-    } catch { /* ignore */ }
+    } catch (err) { setError(err.message); }
     setActionLoading(null);
   }
 
@@ -415,13 +415,13 @@ export default function ReviewQueue() {
                           </span>
                         </div>
                       )}
-                      {task.ai_confidence != null && (
+                      {task.violation?.confidence != null && (
                         <span className={cn(
                           "text-xs font-medium",
-                          task.ai_confidence >= 70 ? "text-success" :
-                          task.ai_confidence >= 40 ? "text-warning" : "text-destructive"
+                          task.violation.confidence >= 70 ? "text-success" :
+                          task.violation.confidence >= 40 ? "text-warning" : "text-destructive"
                         )}>
-                          AI {task.ai_confidence}%
+                          AI {task.violation.confidence}%
                         </span>
                       )}
                     </div>
@@ -558,15 +558,15 @@ function ReviewPanel({
             <div className="flex items-center gap-3">
               <div className={cn(
                 "flex size-12 items-center justify-center rounded-full border-2 text-sm font-bold shrink-0",
-                task.ai_confidence >= 70 ? "border-success/30 bg-success/10 text-success" :
-                task.ai_confidence >= 40 ? "border-warning/30 bg-warning/10 text-warning" :
+                task.violation?.confidence >= 70 ? "border-success/30 bg-success/10 text-success" :
+                task.violation?.confidence >= 40 ? "border-warning/30 bg-warning/10 text-warning" :
                 "border-destructive/30 bg-destructive/10 text-destructive"
               )}>
-                {task.ai_confidence ?? "?"}%
+                {task.violation?.confidence ?? "?"}%
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                {task.ai_confidence >= 70 ? "AI is confident in this finding. Quick human review recommended."
-                 : task.ai_confidence >= 40 ? "AI confidence is moderate. Please review carefully."
+                {task.violation?.confidence >= 70 ? "AI is confident in this finding. Quick human review recommended."
+                 : task.violation?.confidence >= 40 ? "AI confidence is moderate. Please review carefully."
                  : "AI confidence is low. Thorough human review required."}
               </p>
             </div>

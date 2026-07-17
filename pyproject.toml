@@ -1,0 +1,34 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: integration tests",
+    "e2e: end-to-end tests",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/tests/*",
+    "app/migrations/*",
+    "tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.",
+    "raise NotImplementedError",
+    "pass",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"

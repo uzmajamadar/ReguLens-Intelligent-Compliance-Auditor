@@ -260,7 +260,6 @@ export default function DocumentDetail() {
 
   function handleFrameworkClick(fw) {
     setSelectedFramework(fw.framework);
-    setSelectedFramework(fw);
     loadScanDetail(fw.scanId);
     setActiveTab("compliance");
   }

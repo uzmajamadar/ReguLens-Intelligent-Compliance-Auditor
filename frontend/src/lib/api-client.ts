@@ -1,31 +1,11 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { listDocuments } from "./api";
 
-const CONVERSATIONS_KEY = "groq_conversations";
-const MESSAGES_KEY = "groq_messages";
+const BASE = "/api";
 
-function getConversations() {
-  try {
-    return JSON.parse(localStorage.getItem(CONVERSATIONS_KEY) || "[]");
-  } catch {
-    return [];
-  }
-}
-
-function saveConversations(convs) {
-  localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(convs));
-}
-
-function getMessagesMap() {
-  try {
-    return JSON.parse(localStorage.getItem(MESSAGES_KEY) || "{}");
-  } catch {
-    return {};
-  }
-}
-
-function saveMessagesMap(msgs) {
-  localStorage.setItem(MESSAGES_KEY, JSON.stringify(msgs));
+function authHeaders() {
+  const t = sessionStorage.getItem("regulens_token");
+  return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
 export function getListGroqConversationsQueryKey(filters) {
@@ -46,12 +26,15 @@ export function useListDocuments() {
 export function useListGroqConversations(filters, options) {
   return useQuery({
     queryKey: options?.query?.queryKey ?? getListGroqConversationsQueryKey(filters),
-    queryFn: () => {
-      const convs = getConversations();
-      if (filters?.documentId != null) {
-        return convs.filter((c) => c.documentId === filters.documentId);
-      }
-      return convs;
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (filters?.documentId != null) params.set("document_id", String(filters.documentId));
+      const qs = params.toString();
+      const res = await fetch(`${BASE}/groq/conversations${qs ? `?${qs}` : ""}`, {
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) throw new Error("Failed to fetch conversations");
+      return res.json();
     },
     ...(options?.query || {}),
   });
@@ -60,16 +43,13 @@ export function useListGroqConversations(filters, options) {
 export function useCreateGroqConversation() {
   return useMutation({
     mutationFn: async ({ data }) => {
-      const convs = getConversations();
-      const newConv = {
-        id: Date.now(),
-        title: data.title,
-        documentId: data.documentId ?? null,
-        createdAt: new Date().toISOString(),
-      };
-      convs.unshift(newConv);
-      saveConversations(convs);
-      return newConv;
+      const res = await fetch(`${BASE}/groq/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ title: data.title, document_id: data.documentId ?? null }),
+      });
+      if (!res.ok) throw new Error("Failed to create conversation");
+      return res.json();
     },
   });
 }
@@ -77,11 +57,11 @@ export function useCreateGroqConversation() {
 export function useDeleteGroqConversation() {
   return useMutation({
     mutationFn: async ({ id }) => {
-      const convs = getConversations().filter((c) => c.id !== id);
-      saveConversations(convs);
-      const msgs = getMessagesMap();
-      delete msgs[id];
-      saveMessagesMap(msgs);
+      const res = await fetch(`${BASE}/groq/conversations/${id}`, {
+        method: "DELETE",
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) throw new Error("Failed to delete conversation");
     },
   });
 }
@@ -89,9 +69,12 @@ export function useDeleteGroqConversation() {
 export function useListGroqMessages(conversationId, options) {
   return useQuery({
     queryKey: options?.query?.queryKey ?? getListGroqMessagesQueryKey(conversationId),
-    queryFn: () => {
-      const msgs = getMessagesMap();
-      return msgs[conversationId] || [];
+    queryFn: async () => {
+      const res = await fetch(`${BASE}/groq/conversations/${conversationId}/messages`, {
+        headers: { ...authHeaders() },
+      });
+      if (!res.ok) throw new Error("Failed to fetch messages");
+      return res.json();
     },
     ...(options?.query || {}),
   });

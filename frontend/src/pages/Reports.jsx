@@ -9,6 +9,7 @@ import {
   getReviewStats, listReviewTasks, listAllViolations, listDocuments,
   listAuditLogs, getAdminStats, getAvailableFrameworks, listUsers,
 } from "../lib/api";
+import { useAuth } from "../context/AuthContext";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "../components/shared/PageHeader";
@@ -208,6 +209,8 @@ function ExportCSV({ data, filename }) {
 
 export default function Reports() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const [adminStats, setAdminStats] = useState(null);
   const [reviewStats, setReviewStats] = useState(null);
   const [violations, setViolations] = useState([]);
@@ -227,15 +230,19 @@ export default function Reports() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [admStats, revStats, allViolations, docs, tasks, logs, fws, allUsers] = await Promise.all([
-        getAdminStats().catch(() => null),
+      const baseCalls = [
         getReviewStats().catch(() => null),
         listAllViolations().catch(() => []),
         listDocuments().catch(() => []),
         listReviewTasks("", null, null).catch(() => []),
-        listAuditLogs({ limit: 200, offset: 0 }).catch(() => []),
         getAvailableFrameworks().catch(() => []),
-        listUsers().catch(() => []),
+      ];
+      const adminCalls = isAdmin
+        ? [getAdminStats().catch(() => null), listAuditLogs({ limit: 200, offset: 0 }).catch(() => []), listUsers().catch(() => [])]
+        : [Promise.resolve(null), Promise.resolve([]), Promise.resolve([])];
+      const [revStats, allViolations, docs, tasks, fws, admStats, logs, allUsers] = await Promise.all([
+        ...baseCalls,
+        ...adminCalls,
       ]);
       setAdminStats(admStats);
       setReviewStats(revStats);
@@ -247,7 +254,7 @@ export default function Reports() {
       setUsers(allUsers);
     } catch { /* ignore */ }
     finally { setLoading(false); }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => { loadData(); }, [loadData]);
 

@@ -107,17 +107,15 @@ export default function ReviewInspector({
   const isInReview = task.status === "in_review";
   const isAssigned = task.status === "assigned";
   const isApproved = task.status === "approved";
-  const isWaitingFix = task.status === "waiting_for_fix";
-  const isPendingAssignment = task.status === "pending_assignment";
-  const isPendingReview = task.status === "pending_review";
+  const isChangesRequested = task.status === "changes_requested";
+  const isPending = task.status === "pending";
   const isResolved = task.status === "resolved";
   const isDismissed = task.status === "dismissed";
-  const isNeedsFix = task.status === "needs_fix";
 
   const canReview = isInReview;
   const canStartReview = isAssigned;
-  const canResolve = isApproved || isWaitingFix;
-  const canAssign = !task.assigned_to && (isPendingReview || isPendingAssignment);
+  const canResolve = isApproved;
+  const canAssign = !task.assigned_to && isPending;
 
   const tabs = [
     { id: "overview", label: "Overview" },
@@ -168,7 +166,7 @@ export default function ReviewInspector({
               <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium", fwColor)}>
                 {task.framework}
               </span>
-              <StatusBadge variant={isInReview ? "info" : isApproved || isResolved ? "success" : isDismissed ? "pending" : "warning"}>
+              <StatusBadge variant={isInReview ? "info" : isApproved || isResolved ? "success" : isDismissed ? "pending" : isChangesRequested ? "warning" : "warning"}>
                 {isInReview ? "In Review" : task.status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
               </StatusBadge>
             </div>
@@ -218,12 +216,12 @@ export default function ReviewInspector({
             <div>
               <SectionHeader icon={Activity} title="Activity Timeline" />
               <div className="mt-2">
-                <TimelineEntry icon={FileText} label="Task Created" description="AI evaluation completed" timestamp={task.created_at ? new Date(task.created_at).toLocaleString() : "—"} isActive isLast={!task.assigned_to && !isInReview && !isApproved && !isNeedsFix && !isResolved && !isDismissed} />
+                <TimelineEntry icon={FileText} label="Task Created" description="AI evaluation completed" timestamp={task.created_at ? new Date(task.created_at).toLocaleString() : "—"} isActive isLast={!task.assigned_to && !isInReview && !isApproved && !isChangesRequested && !isResolved && !isDismissed} />
                 {task.assigned_to && (
-                  <TimelineEntry icon={User} label="Assigned" description={`Assigned to ${task.assigned_to}`} timestamp={task.updated_at ? new Date(task.updated_at).toLocaleString() : "—"} isActive={isAssigned} isLast={!isInReview && !isApproved && !isNeedsFix && !isResolved && !isDismissed} />
+                  <TimelineEntry icon={User} label="Assigned" description={`Assigned to ${task.assigned_to}`} timestamp={task.updated_at ? new Date(task.updated_at).toLocaleString() : "—"} isActive={isAssigned} isLast={!isInReview && !isApproved && !isChangesRequested && !isResolved && !isDismissed} />
                 )}
-                {(isInReview || isApproved || isNeedsFix || isResolved || isDismissed) && (
-                  <TimelineEntry icon={Eye} label="Review Started" description="Human review in progress" timestamp="—" isActive={isInReview} isLast={!isApproved && !isNeedsFix && !isResolved && !isDismissed} />
+                {(isInReview || isApproved || isChangesRequested || isResolved || isDismissed) && (
+                  <TimelineEntry icon={Eye} label="Review Started" description="Human review in progress" timestamp="—" isActive={isInReview} isLast={!isApproved && !isChangesRequested && !isResolved && !isDismissed} />
                 )}
                 {(isApproved || isResolved) && (
                   <TimelineEntry icon={CheckCircle2} label="Approved" description="Finding accepted" timestamp="—" isActive={isApproved} isLast={!isResolved} />
@@ -231,8 +229,8 @@ export default function ReviewInspector({
                 {isResolved && (
                   <TimelineEntry icon={CheckCircle2} label="Resolved" description="Finding has been resolved" timestamp="—" isActive isLast />
                 )}
-                {(isNeedsFix || isWaitingFix) && (
-                  <TimelineEntry icon={AlertTriangle} label="Needs Fix" description="Issues identified for remediation" timestamp="—" isActive={isNeedsFix} isLast={!isWaitingFix} />
+                {isChangesRequested && (
+                  <TimelineEntry icon={AlertTriangle} label="Changes Requested" description="Issues identified for remediation" timestamp="—" isActive isLast />
                 )}
                 {isDismissed && (
                   <TimelineEntry icon={ThumbsDown} label="Dismissed" description="Finding dismissed" timestamp="—" isActive isLast />
@@ -424,7 +422,7 @@ export default function ReviewInspector({
           </Button>
         )}
 
-        {(isResolved || isDismissed || isNeedsFix || (isPendingReview && task.assigned_to) || (isPendingAssignment)) && !canAssign && !canStartReview && !canReview && !canResolve && (
+        {(isResolved || isDismissed || isChangesRequested) && !canAssign && !canStartReview && !canReview && !canResolve && (
           <p className="text-xs text-muted-foreground text-center py-2 italic">
             {isResolved ? "Finding has been resolved." : isDismissed ? "Finding has been dismissed." : "No actions available."}
           </p>

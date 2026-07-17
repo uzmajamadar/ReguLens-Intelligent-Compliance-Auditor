@@ -240,7 +240,8 @@ def notify_resolved(db: Session, task: ReviewTask, reviewer: User | None = None)
 
     # Also notify compliance managers for approved/rejected
     if task.status in ("approved", "dismissed", "resolved"):
-        org_id = owner.organization_id if owner else None
+        doc = db.query(Document).filter(Document.id == task.document_id).first()
+        org_id = doc.organization_id if doc else None
         if org_id:
             for cm in _compliance_managers(db, org_id):
                 if cm.id != (owner.id if owner else -1):
@@ -513,3 +514,14 @@ def notify_changes_requested(db: Session, task: ReviewTask, reviewer: User):
             {"type": "button", "text": {"type": "plain_text", "text": "Upload New Version"}, "url": f"{settings.app_url}/documents/{task.document_id}"},
         ],
     )
+
+    # Notify compliance managers
+    doc = db.query(Document).filter(Document.id == task.document_id).first()
+    org_id = doc.organization_id if doc else None
+    if org_id:
+        for cm in _compliance_managers(db, org_id):
+            if cm.id != (owner.id if owner else -1) and cm.id != reviewer.id:
+                _in_app_notification(db, cm.id,
+                    f"Changes Requested: {ctx['rule_name']}",
+                    f"Reviewer {reviewer.name} requested changes on '{ctx['doc_name']}'.\nRule: {ctx['rule_name']}",
+                    "changes_requested", task.id)

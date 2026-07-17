@@ -20,6 +20,9 @@ from app.embeddings import embed_query
 from app.models import Document, DocumentVersion, RuleEvaluation, ReviewTask, Scan, User, Violation
 from app.workflow_engine import create_workflow_instance
 from app.vector_store import delete_document_points
+from app.chunk_diff import compute_chunk_diff, get_changed_chunk_hashes
+from app.selective_engine import determine_affected_rules, run_selective_audit, store_rule_chunk_mappings
+from app.reconciliation import reconcile_all_frameworks
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +150,11 @@ class ScanSummary(BaseModel):
     violation_count: int = 0
     created_at: str
     completed_at: str | None = None
+    scan_type: str = "full"
+    rules_evaluated: int | None = None
+    rules_skipped: int | None = None
+    changed_chunks: int | None = None
+    changed_percentage: float | None = None
 
 
 class MultiScanSummary(BaseModel):
@@ -173,6 +181,11 @@ class ViolationSchema(BaseModel):
     task_id: int | None = None
     assigned_to: str | None = None
     due_date: str | None = None
+    document_version: int | None = None
+    section_path: str | None = None
+    previous_violation_id: int | None = None
+    framework: str | None = None
+    status: str | None = None
 
 
 class RuleEvaluationSchema(BaseModel):
@@ -378,6 +391,11 @@ def list_document_scans(
                 violation_count=s.violation_count,
                 created_at=s.created_at.isoformat(),
                 completed_at=s.completed_at.isoformat() if s.completed_at else None,
+                scan_type=s.scan_type or "full",
+                rules_evaluated=s.rules_evaluated,
+                rules_skipped=s.rules_skipped,
+                changed_chunks=s.changed_chunks,
+                changed_percentage=s.changed_percentage,
             )
         )
     return result
@@ -431,6 +449,11 @@ def get_scan_detail(
                 task_id=review_tasks[v.rule_id].id if v.rule_id in review_tasks else None,
                 assigned_to=review_tasks[v.rule_id].assigned_to if v.rule_id in review_tasks else None,
                 due_date=review_tasks[v.rule_id].due_date.isoformat() if v.rule_id in review_tasks and review_tasks[v.rule_id].due_date else None,
+                document_version=v.document_version,
+                section_path=v.section_path,
+                previous_violation_id=v.previous_violation_id,
+                framework=v.framework,
+                status=v.status,
             )
             for v in scan.violations
         ],
@@ -639,6 +662,13 @@ def _save_rule_result(
         return 1
 
     def _create_review_task(reason: str):
+        existing = db.query(ReviewTask).filter(
+            ReviewTask.scan_id == scan.id,
+            ReviewTask.rule_id == r.rule_id,
+            ReviewTask.document_id == document_id,
+        ).first()
+        if existing:
+            return 0
         db.add(ReviewTask(
             scan_id=scan.id,
             rule_evaluation_id=eval_row.id,
@@ -659,13 +689,21 @@ def _save_rule_result(
 
     if status == "failed":
         v_count = _create_violation()
-        # Create review task for low/medium confidence
-        if r.confidence is None or r.confidence < 90:
+        existing_count = db.query(ReviewTask).filter(
+            ReviewTask.scan_id == scan.id,
+            ReviewTask.document_id == document_id,
+        ).count()
+        if existing_count < 10 and (r.confidence is None or r.confidence < 90):
             rt_count = _create_review_task("low_confidence")
 
     elif status == "warning":
         v_count = _create_violation()
-        rt_count = _create_review_task("low_confidence")
+        existing_count = db.query(ReviewTask).filter(
+            ReviewTask.scan_id == scan.id,
+            ReviewTask.document_id == document_id,
+        ).count()
+        if existing_count < 10:
+            rt_count = _create_review_task("low_confidence")
 
     elif status == "error":
         rt_count = _create_review_task(_review_reason_from_error(r.error or ""))
@@ -681,7 +719,12 @@ def _run_auto_scan(
     frameworks: list[str],
     current_user: User,
 ) -> str | None:
-    """Internal scan helper — called after upload or programmatically. Returns status ('scanned' or None on failure)."""
+    """Internal scan helper — called after upload or programmatically. Returns status ('scanned' or None on failure).
+
+    Supports selective revalidation: computes chunk diffs and only re-evaluates
+    rules affected by changed content, carrying forward previous results for
+    unchanged rules.
+    """
     doc = db.query(Document).filter(Document.id == document_id).first()
     if not doc or not GROQ_API_KEY:
         return None
@@ -691,48 +734,123 @@ def _run_auto_scan(
     scan_records: dict[str, Scan] = {}
     total_violations = 0
 
+    # ── Step 1: Compute chunk diff to decide full vs selective scan ──────
+    chunk_diff = compute_chunk_diff(db, document_id)
+    scan_type = "full"
+    rules_evaluated_count = 0
+    rules_skipped_count = 0
+
+    if not chunk_diff.should_full_rescan and chunk_diff.total_old_chunks > 0:
+        # Selective revalidation path
+        changed_hashes = get_changed_chunk_hashes(chunk_diff, db)
+        plan = determine_affected_rules(db, document_id, changed_hashes, frameworks)
+
+        if not plan.should_full_rescan:
+            scan_type = "selective"
+            logger.info(
+                "Selective scan for doc %d: %d affected rules, %d carried forward",
+                document_id, len(plan.affected_rules), len(plan.carried_forward_rules),
+            )
+        else:
+            logger.info(
+                "Full scan triggered for doc %d: %s",
+                document_id, plan.reason,
+            )
+
+    # ── Step 2: Create Scan records ─────────────────────────────────────
     for fw in frameworks:
         scan_records[fw] = Scan(
             document_id=document_id,
             scan_group_id=scan_group_id,
             framework=fw,
             status="running",
+            scan_type=scan_type,
+            chunks_diffed=chunk_diff.total_old_chunks + chunk_diff.total_new_chunks,
+            changed_chunks=chunk_diff.changed_chunks,
+            changed_percentage=round(chunk_diff.changed_percentage * 100, 2),
         )
         db.add(scan_records[fw])
     db.flush()
 
+    # ── Step 3: Run audit (full or selective) ────────────────────────────
     try:
-        from app.compliance_engine import run_multi_framework_audit
-        report = run_multi_framework_audit(
-            collection_name=coll,
-            groq_api_key=GROQ_API_KEY,
-            frameworks=frameworks,
-            top_k_per_rule=2,
-            document_id=document_id,
-        )
+        if scan_type == "selective":
+            # Selective revalidation
+            changed_hashes = get_changed_chunk_hashes(chunk_diff, db)
+            plan = determine_affected_rules(db, document_id, changed_hashes, frameworks)
+            selective_result = run_selective_audit(
+                db=db,
+                document_id=document_id,
+                plan=plan,
+                collection_name=coll,
+                groq_api_key=GROQ_API_KEY,
+                frameworks=frameworks,
+                top_k_per_rule=2,
+            )
+            all_results = selective_result.all_results
+            rules_evaluated_count = selective_result.rules_evaluated
+            rules_skipped_count = selective_result.rules_skipped
 
-        for fw in frameworks:
-            scan = scan_records[fw]
-            fw_report = report.per_framework.get(fw)
-            if fw_report:
+            # Group results by framework for per-scan persistence
+            from collections import defaultdict
+            results_by_fw: dict[str, list] = defaultdict(list)
+            for r in all_results:
+                results_by_fw[r.regulation].append(r)
+
+            for fw in frameworks:
+                scan = scan_records[fw]
+                fw_results = results_by_fw.get(fw, [])
                 fw_violations = 0
-                fw_deductions = 0
-                for r in fw_report.results:
+                for r in fw_results:
                     v, _ = _save_rule_result(db, scan, document_id, r, current_user)
                     fw_violations += v
-                    if r.violation:
-                        fw_deductions += r.points_deducted
                 scan.status = "completed"
-                scan.score = max(0, 100 - fw_deductions)
-                scan.grade = fw_report.grade
-                scan.violation_count = fw_violations
                 scan.completed_at = datetime.now(timezone.utc)
+                scan.rules_evaluated = sum(1 for r in fw_results if r not in selective_result.carried_results)
+                scan.rules_skipped = sum(1 for r in fw_results if r in selective_result.carried_results)
                 total_violations += fw_violations
-            else:
-                scan.status = "completed"
-                scan.score = 0
-                scan.grade = "F"
-                scan.completed_at = datetime.now(timezone.utc)
+                _recalculate_scan_score(scan, db)
+
+            # Store rule-chunk mappings for future selective scans
+            store_rule_chunk_mappings(db, document_id, scan_records[frameworks[0]].id, all_results)
+
+        else:
+            # Full rescan path
+            from app.compliance_engine import run_multi_framework_audit
+            report = run_multi_framework_audit(
+                collection_name=coll,
+                groq_api_key=GROQ_API_KEY,
+                frameworks=frameworks,
+                top_k_per_rule=2,
+                document_id=document_id,
+            )
+
+            all_results_for_mapping = []
+            for fw in frameworks:
+                scan = scan_records[fw]
+                fw_report = report.per_framework.get(fw)
+                if fw_report:
+                    fw_violations = 0
+                    for r in fw_report.results:
+                        v, _ = _save_rule_result(db, scan, document_id, r, current_user)
+                        fw_violations += v
+                    scan.status = "completed"
+                    scan.grade = fw_report.grade
+                    scan.completed_at = datetime.now(timezone.utc)
+                    scan.rules_evaluated = len(fw_report.results)
+                    scan.rules_skipped = 0
+                    total_violations += fw_violations
+                    all_results_for_mapping.extend(fw_report.results)
+                    _recalculate_scan_score(scan, db)
+                else:
+                    scan.status = "completed"
+                    scan.score = 0
+                    scan.grade = "F"
+                    scan.completed_at = datetime.now(timezone.utc)
+
+            # Store rule-chunk mappings for future selective scans
+            if all_results_for_mapping:
+                store_rule_chunk_mappings(db, document_id, scan_records[frameworks[0]].id, all_results_for_mapping)
 
         for fw in frameworks:
             create_workflow_instance(db, document_id, scan_records[fw].id, fw)
@@ -744,14 +862,20 @@ def _run_auto_scan(
         logger.exception("Auto-scan failed for document %d", document_id)
         return None
 
+    # ── Reconcile violations across versions (links, reuse tasks, resolve fixed) ──
+    reconciliation = reconcile_all_frameworks(
+        db, document_id, [s.id for s in scan_records.values()],
+    )
     _auto_resolve_fixed_tasks(db, [s.id for s in scan_records.values()], document_id, current_user)
     doc.status = "scanned"
     log_audit(db, current_user.id, "auto_scan",
-              f"Auto-scan document {document_id} — frameworks={frameworks} violations={total_violations}")
+              f"Auto-scan document {document_id} — frameworks={frameworks} type={scan_type} "
+              f"violations={total_violations} evaluated={rules_evaluated_count} skipped={rules_skipped_count}")
 
     from app.notifications import notify_scan_complete
     for fw in frameworks:
         notify_scan_complete(db, doc, fw)
+    db.commit()
     return "scanned"
 
 
@@ -895,6 +1019,11 @@ def run_document_scan(
                     violation_count=s.violation_count,
                     created_at=s.created_at.isoformat(),
                     completed_at=s.completed_at.isoformat() if s.completed_at else None,
+                    scan_type=s.scan_type or "full",
+                    rules_evaluated=s.rules_evaluated,
+                    rules_skipped=s.rules_skipped,
+                    changed_chunks=s.changed_chunks,
+                    changed_percentage=s.changed_percentage,
                 )
                 for s in scan_records.values()
             ],
@@ -973,6 +1102,11 @@ def run_document_scan(
         violation_count=scan.violation_count,
         created_at=scan.created_at.isoformat(),
         completed_at=scan.completed_at.isoformat() if scan.completed_at else None,
+        scan_type=scan.scan_type or "full",
+        rules_evaluated=scan.rules_evaluated,
+        rules_skipped=scan.rules_skipped,
+        changed_chunks=scan.changed_chunks,
+        changed_percentage=scan.changed_percentage,
     )
 
 

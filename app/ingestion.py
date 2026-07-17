@@ -9,8 +9,11 @@ Pipeline per uploaded file:
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, TYPE_CHECKING
 
@@ -41,12 +44,34 @@ class PageResult:
 
 
 @dataclass
+class ChunkMetadata:
+    """Rich metadata for a single chunk — used for content-addressed storage."""
+    chunk_index: int
+    text: str
+    content_hash: str               # SHA-256 of chunk text
+    page_numbers: list[int]         # which pages this chunk spans
+    section_heading: str | None     # nearest heading above this chunk
+    section_path: str | None        # hierarchical heading path
+
+    def to_dict(self) -> dict:
+        return {
+            "chunk_index": self.chunk_index,
+            "text": self.text,
+            "content_hash": self.content_hash,
+            "page_numbers": self.page_numbers,
+            "section_heading": self.section_heading,
+            "section_path": self.section_path,
+        }
+
+
+@dataclass
 class ExtractionResult:
     pages: List[PageResult]
     full_text: str
     page_count: int
     has_ocr_pages: bool
     chunks: List[str]
+    chunk_metadata: List[ChunkMetadata] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +109,128 @@ def _chunk_text(text: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Page mapping & heading extraction
+# ---------------------------------------------------------------------------
+
+_PAGE_MARKER_RE = re.compile(r"^--- Page (\d+) ---$", re.MULTILINE)
+
+_HEADING_PATTERNS = [
+    # Markdown-style headings
+    re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE),
+    # ALL CAPS lines (likely headings in compliance docs)
+    re.compile(r"^([A-Z][A-Z\s\-:]{5,})$", re.MULTILINE),
+    # Numbered sections like "1. Introduction" or "3.2 Data Retention"
+    re.compile(r"^(\d+(?:\.\d+)*)\s+([A-Z].+)$", re.MULTILINE),
+]
+
+
+def _extract_headings(full_text: str) -> list[tuple[str, int, str]]:
+    """Extract headings with their character offsets.
+
+    Returns list of (heading_text, char_offset, section_path_component).
+    """
+    headings: list[tuple[str, int, str]] = []
+
+    for pattern in _HEADING_PATTERNS:
+        for match in pattern.finditer(full_text):
+            text = match.group(0).strip()
+            # Normalize: strip markdown markers, trailing whitespace
+            clean = re.sub(r"^(#{1,6}\s+|\d+(?:\.\d+)*\s+)", "", text).strip()
+            if clean and len(clean) < 200:
+                headings.append((clean, match.start(), clean))
+
+    # Sort by position in document
+    headings.sort(key=lambda h: h[1])
+    return headings
+
+
+def _build_page_map(full_text: str) -> list[tuple[int, int, int]]:
+    """Build a mapping of (page_num, char_start, char_end) from page markers."""
+    page_map: list[tuple[int, int, int]] = []
+    markers = list(_PAGE_MARKER_RE.finditer(full_text))
+
+    for i, marker in enumerate(markers):
+        page_num = int(marker.group(1))
+        start = marker.end() + 1  # after the marker line
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(full_text)
+        page_map.append((page_num, start, end))
+
+    return page_map
+
+
+def _find_pages_for_chunk(chunk_start: int, chunk_end: int, page_map: list[tuple[int, int, int]]) -> list[int]:
+    """Determine which pages a chunk spans based on character positions."""
+    pages: list[int] = []
+    for page_num, p_start, p_end in page_map:
+        # Chunk overlaps with this page if their ranges intersect
+        if chunk_start < p_end and chunk_end > p_start:
+            pages.append(page_num)
+    return pages or [1]
+
+
+def _find_section_for_offset(offset: int, headings: list[tuple[str, int, str]]) -> tuple[str | None, str | None]:
+    """Find the section heading and path for a given character offset."""
+    current_heading = None
+    path_parts: list[str] = []
+
+    for heading_text, heading_offset, _ in headings:
+        if heading_offset <= offset:
+            current_heading = heading_text
+            # Simple path: last 2 headings for context
+            path_parts.append(heading_text)
+            if len(path_parts) > 3:
+                path_parts = path_parts[-3:]
+        else:
+            break
+
+    section_path = " > ".join(path_parts) if path_parts else None
+    return current_heading, section_path
+
+
+def _compute_chunk_metadata(chunks: List[str], full_text: str) -> List[ChunkMetadata]:
+    """Compute rich metadata for each chunk: page numbers, section heading, content hash."""
+    page_map = _build_page_map(full_text)
+    headings = _extract_headings(full_text)
+    metadata: list[ChunkMetadata] = []
+
+    # Track cumulative position to map chunks back to the full text
+    search_start = 0
+
+    for idx, chunk_text in enumerate(chunks):
+        content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+
+        # Find this chunk's position in the full text
+        chunk_pos = full_text.find(chunk_text[:100], search_start)
+        if chunk_pos == -1:
+            # Fallback: try from the beginning
+            chunk_pos = full_text.find(chunk_text[:100])
+
+        chunk_start = chunk_pos
+        chunk_end = chunk_pos + len(chunk_text)
+
+        # Map to pages
+        page_numbers = _find_pages_for_chunk(chunk_start, chunk_end, page_map)
+
+        # Map to section
+        section_heading, section_path = _find_section_for_offset(chunk_start, headings)
+
+        metadata.append(ChunkMetadata(
+            chunk_index=idx,
+            text=chunk_text,
+            content_hash=content_hash,
+            page_numbers=page_numbers,
+            section_heading=section_heading,
+            section_path=section_path,
+        ))
+
+        # Advance search position for next chunk
+        if chunk_pos >= 0:
+            search_start = chunk_pos + 1
+
+    return metadata
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -96,6 +243,7 @@ def process_pdf(file_bytes: bytes) -> ExtractionResult:
       2. Extract / OCR each page
       3. Concatenate page texts
       4. Chunk the full text
+      5. Compute chunk metadata (page mapping, section headings, content hashes)
 
     Raises:
       ValueError: if the file cannot be parsed as a PDF.
@@ -132,6 +280,9 @@ def process_pdf(file_bytes: bytes) -> ExtractionResult:
     )
     chunks = _chunk_text(full_text)
 
+    # Compute rich metadata for each chunk
+    chunk_metadata = _compute_chunk_metadata(chunks, full_text)
+
     logger.info(
         "Processed PDF: %d pages, %d chunks, OCR=%s",
         len(pages), len(chunks), has_ocr,
@@ -143,4 +294,5 @@ def process_pdf(file_bytes: bytes) -> ExtractionResult:
         page_count=len(pages),
         has_ocr_pages=has_ocr,
         chunks=chunks,
+        chunk_metadata=chunk_metadata,
     )

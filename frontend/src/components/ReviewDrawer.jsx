@@ -19,17 +19,16 @@ const SEVERITY_COLORS = {
 };
 
 const STATUS_DISPLAY = {
-  pending_review: { label: "Open", color: "bg-amber-100 text-amber-700 border-amber-200" },
-  pending_assignment: { label: "Pending Assignment", color: "bg-indigo-100 text-indigo-700 border-indigo-200" },
+  pending: { label: "Pending", color: "bg-amber-100 text-amber-700 border-amber-200" },
   assigned: { label: "Assigned", color: "bg-blue-100 text-blue-700 border-blue-200" },
-  in_review: { label: "In Review", color: "bg-amber-100 text-amber-700 border-amber-200" },
+  in_review: { label: "In Review", color: "bg-indigo-100 text-indigo-700 border-indigo-200" },
   approved: { label: "Approved", color: "bg-green-100 text-green-700 border-green-200" },
-  waiting_for_fix: { label: "Waiting for Fix", color: "bg-purple-100 text-purple-700 border-purple-200" },
+  changes_requested: { label: "Changes Requested", color: "bg-orange-100 text-orange-700 border-orange-200" },
   dismissed: { label: "Dismissed", color: "bg-gray-100 text-gray-600 border-gray-200" },
-  needs_fix: { label: "Needs Fix", color: "bg-red-100 text-red-700 border-red-200" },
+  resolved: { label: "Resolved", color: "bg-green-100 text-green-700 border-green-200" },
 };
 
-export default function ReviewDrawer({ task, open, onClose, onApprove, onReject, onNeedsFix, notes, onNotesChange, actionLoading }) {
+export default function ReviewDrawer({ task, open, onClose, onApprove, onStartReview, onReject, onNeedsFix, notes, onNotesChange, actionLoading }) {
   const [showDismissReason, setShowDismissReason] = useState(false);
   const [dismissReason, setDismissReason] = useState("");
 
@@ -233,7 +232,7 @@ export default function ReviewDrawer({ task, open, onClose, onApprove, onReject,
             <Button
               variant="default"
               size="sm"
-              onClick={onApprove}
+              onClick={onStartReview}
               disabled={actionLoading === task.id}
             >
               {actionLoading === task.id ? <Loader2 className="size-4 animate-spin" /> : null}
